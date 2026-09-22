@@ -1,65 +1,90 @@
 [project]
 name = "reap"
-version = "0.1.0"
-description = "reap: MoE Compression with expert pruning and merging."
+# The Legwork fork's own line (PEP 440 local version): upstream 0.1.0 plus
+# the `legwork` branch's changes; the desktop worker pins the release
+# tarball of exactly this version by sha256 (REAP_SOURCE).
+version = "0.1.0+legwork.1"
+description = "reap: MoE Compression with expert pruning and merging (the Legwork fork: a slim prune lane for DeepSeek-V4)."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Mike Lasby", email = "mklasby@gmail.com" }
 ]
+maintainers = [
+    { name = "Legwork" }
+]
 requires-python = ">=3.12"
+# The slim core the Legwork prune lane needs (`reap.legwork`): the fused
+# experts families of transformers 5.x, CPU or GPU torch, the checkpoint
+# formats. The research stack upstream's entry points import is the
+# `research` extra below; nothing in the core imports it.
 dependencies = [
+    "torch>=2.5",
+    "transformers>=5.11",
     "accelerate>=1.7.0",
+    "safetensors>=0.4.3",
+    "huggingface_hub>=1.0",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+# Upstream's research toolchain (evaluation, merging, the notebooks) —
+# the four editable third-party checkouts (`third-party/*`, git
+# submodules) ride the upstream `main` branch's `uv.lock`, not this extra.
+research = [
     "datasets>=3.6.0, <4.0.0",
-    "evalplus[vllm]>=0.3.1",
-    "jupyter>=1.1.1",
     "lm-eval[vllm,api]>=0.4.9.1",
     "matplotlib>=3.10.3",
     "python-dotenv>=1.1.0",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
     "seaborn>=0.13.2",
-    "torch==2.7.1",
-    # "transformers==4.53.3",  # latest version working for ernie.
-    "transformers==4.55.0",
     "umap-learn>=0.5.7",
-    "vllm==0.10.0",
-    "livecodebench",
+    "vllm>=0.10.0",
     "deepspeed>=0.17.4",
     "trl>=0.21.0",
-    "hatchling>=1.27.0",
-    # "flash-attn>=2.7.1,<=2.8.0", # required for xformers for Llama4. Might need to manually install with --no-build-isolation
-    # "flash-attn>=2.8.3",
     "wandb>=0.21.1",
-    "crfm-helm",
-    "evalscope",
 ]
 
-[tool.uv.sources]
-evalplus = { path = "third-party/evalplus", editable = true }
-livecodebench = { path="third-party/LiveCodeBench", editable = true}
-crfm-helm = { path="third-party/helm", editable = true }
-evalscope = { path = "third-party/evalscope", editable=true}
+[project.scripts]
+reap-collect = "reap.legwork.collect:main"
+reap-prune = "reap.legwork.prune:main"
 
-[project.entry-points."vllm.general_plugins"]
-llama_4_text_only = "reap.model_util:register_llama_with_vllm"
+[project.urls]
+Upstream = "https://github.com/CerebrasResearch/reap"
+Fork = "https://github.com/deacix/reap"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+# The release tarball the Legwork worker installs: the package, its
+# tests, the licence texts — never the notebooks, figures or the
+# research lockfile.
+include = [
+    "src/reap",
+    "tests",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "pyproject.toml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
-    "kaleido>=1.0.0",
-    "matplotlib>=3.10.3",
-    "pandas>=2.3.0",
-    "plotly>=6.1.2",
     "pytest>=8.4.1",
-    "seaborn>=0.13.2",
-    "umap-learn>=0.5.7",
-    "google-api-python-client",
-    "google-auth-httplib2",
-    "google-auth-oauthlib",
 ]
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 select = ["SIM"]
-

@@ -1,0 +1,25 @@
+REAP: Router-weighted Expert Activation Pruning for SMoE compression
+Copyright Cerebras Systems (https://github.com/CerebrasResearch/reap)
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This distribution is the Legwork fork of REAP
+(https://github.com/deacix/reap, branch `legwork`) and carries
+modifications Copyright 2026 the Legwork authors, under the same licence:
+
+  - src/reap/model_util.py    the DeepseekV4ForCausalLM entry of MODEL_ATTRS
+                              (and its `deepseek_v4` alias)
+  - src/reap/legwork/         the slim prune lane: the router-stats observer,
+                              the pruner (--keep, --skip-layers, the hash-table
+                              remap), the ragged-checkpoint loader, the
+                              `reap-collect` / `reap-prune` CLIs and their
+                              STAGE_PROGRESS contract
+  - tests/legwork/, tests/conftest.py
+                              the CPU suite on a tiny random DeepSeek-V4; the
+                              research suites collected only with their stack
+  - pyproject.toml            the slim dependency core (the research stack as
+                              the `research` extra), the sdist contents, the
+                              console scripts, this fork's version line
+
+Each modified or added file states the change in its header, per section
+4(b) of the licence. The research code, its results and the paper
+(arXiv 2510.13999) remain the work of the upstream authors.

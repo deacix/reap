@@ -1,3 +1,5 @@
+# Modified by the Legwork fork (deacix/reap, the `legwork` branch, 2026):
+# the DeepseekV4ForCausalLM entry of MODEL_ATTRS and its `deepseek_v4` alias.
 import torch
 import logging
 
@@ -115,7 +117,36 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # DeepSeek-V4 (Legwork fork, `legwork` branch; transformers >= 5.11 ships
+    # the `deepseek_v4` model type). Fused experts under `layer.mlp`:
+    # `experts.gate_up_proj` [E, 2I, H] and `experts.down_proj` [E, H, I]; the
+    # router at `mlp.gate` is a top-k router carrying `e_score_correction_bias`
+    # on the layers `config.mlp_layer_types` names `moe`, and the frozen
+    # `tid2eid` hash router (token id -> expert ids) on the `hash_moe` layers
+    # (the first three by default); one shared expert at `mlp.shared_experts`.
+    # The loop-based `prune()` above never handles this entry: the Legwork lane
+    # (`reap.legwork`) prunes it, hash tables included.
+    "DeepseekV4ForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_up_proj",
+        "up_proj": "gate_up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": True,
+        "router": "gate",
+        "shared_expert": "shared_experts",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+        "model_type": "deepseek_v4",
+        "hash_table": "tid2eid",
+        "layer_types": "mlp_layer_types",
+        "hash_layer_type": "hash_moe",
+    },
 }
+
+# The same entry under its `config.model_type`, so a caller holding a config
+# and not a model class name resolves it too (`MODEL_ATTRS["deepseek_v4"]`).
+MODEL_ATTRS["deepseek_v4"] = MODEL_ATTRS["DeepseekV4ForCausalLM"]
 
 
 def get_moe(model, layer):

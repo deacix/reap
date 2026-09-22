@@ -1,5 +1,31 @@
 # Router-weighted Expert Activation Pruning (REAP)
 
+> **The Legwork fork (`deacix/reap`, branch `legwork`).** This branch adds a
+> slim, importable prune lane for transformers 5.x's fused mixture-of-experts
+> families, DeepSeek-V4 first: `MODEL_ATTRS["DeepseekV4ForCausalLM"]` (alias
+> `MODEL_ATTRS["deepseek_v4"]`), the `reap.legwork` package and two CLIs that
+> print `STAGE_PROGRESS <pct>` lines for the Legwork desktop worker. The core
+> installs with torch, transformers, accelerate, safetensors and
+> huggingface_hub only; upstream's research stack is the `research` extra.
+> The Legwork worker installs a sha256-pinned release tarball of this branch
+> (never `git+`). Upstream's README follows the fork notes.
+>
+> ```bash
+> # 1. router stats over a calibration set (JSONL rows: text | messages | prompt+completion | input_ids)
+> reap-collect --model <snapshot> --calib <set.jsonl> --out <router-stats.pt> --seq-len 2048 --device auto
+> # 2. keep the 192 most salient experts per layer (hash-routed layers included: their tid2eid tables
+> #    are remapped onto the kept set), save with a `reap_pruning` record in config.json
+> reap-prune --model <snapshot> --stats <router-stats.pt> --out <pruned> --keep 192 --device auto
+> ```
+>
+> Every layer is pruned to the same width because both stock loaders
+> (transformers, vLLM) build every layer from one `n_routed_experts`.
+> `--skip-layers 0,1,2` leaves the named layers at full width: that checkpoint
+> is *ragged*, reloads only through `reap.legwork.load.load_pruned`, and does
+> not serve on vLLM — the CLI says so. `python -m pytest tests/legwork` runs
+> the lane's CPU suite on a tiny random V4 (2 layers, 8 experts, hidden 64).
+> Changes are listed in `NOTICE`.
+
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).
 * 2026-03-19: We have released our data calibration mix recipe for agentic reasoning REAP-compressed models published on HuggingFace (see [details](#huggingface-checkpoints)).
