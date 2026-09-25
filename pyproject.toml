@@ -58,7 +58,9 @@ Upstream = "https://github.com/CerebrasResearch/reap"
 Fork = "https://github.com/deacix/reap"
 
 [build-system]
-requires = ["hatchling"]
+# Pinned so the release sdist rebuilds byte for byte: the desktop worker
+# pins that tarball by sha256, and hatchling writes its own metadata into it.
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]
