@@ -15,7 +15,7 @@ HIDDEN = 64
 TOP_K = 2
 
 
-def tiny_v4_config(mlp_layer_types=("hash_moe", "moe")):
+def tiny_v4_config(mlp_layer_types=("hash_moe", "moe"), experts=EXPERTS, top_k=TOP_K):
     from transformers import DeepseekV4Config
 
     return DeepseekV4Config(
@@ -27,8 +27,8 @@ def tiny_v4_config(mlp_layer_types=("hash_moe", "moe")):
         num_key_value_heads=1,
         head_dim=32,
         q_lora_rank=16,
-        num_experts_per_tok=TOP_K,
-        n_routed_experts=EXPERTS,
+        num_experts_per_tok=top_k,
+        n_routed_experts=experts,
         n_shared_experts=1,
         max_position_embeddings=512,
         hc_mult=2,
@@ -46,11 +46,11 @@ def tiny_v4_config(mlp_layer_types=("hash_moe", "moe")):
     )
 
 
-def build_tiny_v4(seed: int = 0):
+def build_tiny_v4(seed: int = 0, experts: int = EXPERTS, top_k: int = TOP_K):
     from transformers import DeepseekV4ForCausalLM
 
     torch.manual_seed(seed)
-    model = DeepseekV4ForCausalLM(tiny_v4_config()).eval()
+    model = DeepseekV4ForCausalLM(tiny_v4_config(experts=experts, top_k=top_k)).eval()
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for layer in model.model.layers:
@@ -58,7 +58,7 @@ def build_tiny_v4(seed: int = 0):
             if hasattr(gate, "tid2eid"):
                 # A real table never lists one expert twice for a token.
                 table = torch.stack(
-                    [torch.randperm(EXPERTS, generator=generator)[:TOP_K] for _ in range(VOCAB)]
+                    [torch.randperm(experts, generator=generator)[:top_k] for _ in range(VOCAB)]
                 )
                 gate.tid2eid.copy_(table)
     return model
