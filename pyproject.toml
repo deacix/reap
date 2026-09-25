@@ -3,7 +3,7 @@ name = "reap"
 # The Legwork fork's own line (PEP 440 local version): upstream 0.1.0 plus
 # the `legwork` branch's changes; the desktop worker pins the release
 # tarball of exactly this version by sha256 (REAP_SOURCE).
-version = "0.1.0+legwork.1"
+version = "0.1.0+legwork.2"
 description = "reap: MoE Compression with expert pruning and merging (the Legwork fork: a slim prune lane for DeepSeek-V4)."
 readme = "README.md"
 license = "Apache-2.0"

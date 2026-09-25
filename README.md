@@ -11,11 +11,14 @@
 > (never `git+`). Upstream's README follows the fork notes.
 >
 > ```bash
-> # 1. router stats over a calibration set (JSONL rows: text | messages | prompt+completion | input_ids)
-> reap-collect --model <snapshot> --calib <set.jsonl> --out <router-stats.pt> --seq-len 2048 --device auto
+> # 1. router stats over a calibration set (JSONL rows: text | messages | prompt+completion | input_ids),
+> #    and with --map the expert map (gzip JSON)
+> reap-collect --model <snapshot> --calib <set.jsonl> --out <router-stats.pt> --map <map.json.gz> --seq-len 2048 --device auto
 > # 2. keep the 192 most salient experts per layer (hash-routed layers included: their tid2eid tables
 > #    are remapped onto the kept set), save with a `reap_pruning` record in config.json
 > reap-prune --model <snapshot> --stats <router-stats.pt> --out <pruned> --keep 192 --device auto
+> #    or keep exactly the experts a keep plan lists (--stats optional)
+> reap-prune --model <snapshot> --kept <kept.json> --out <pruned> --keep 192 --device auto
 > ```
 >
 > Every layer is pruned to the same width because both stock loaders
@@ -25,6 +28,32 @@
 > not serve on vLLM — the CLI says so. `python -m pytest tests/legwork` runs
 > the lane's CPU suite on a tiny random V4 (2 layers, 8 experts, hidden 64).
 > Changes are listed in `NOTICE`.
+>
+> Since `0.1.0+legwork.2`, a `messages` row may carry OpenAI-style `tools`
+> (the chat template receives them; `tool_calls` and `tool` turns pass
+> through), a row the template cannot render falls back to plain text and
+> counts in `template_fallbacks`, and any row may name its `source` and
+> whether it is `private`. Router stats are version 2 (version 1 still
+> loads): per layer the saliency terms `by_source`, and per expert a top-16
+> token sketch and 3 exemplars read from non-private rows only. `--map`
+> writes the expert map; its schema is `reap.legwork.expert_map`'s docstring
+> (an expert is `protected` when its max output norm is at least 20 times
+> its scope's median). `reap-collect` ends with `REAP_RESULT` `out`,
+> `samples`, `tokens`, `layers`, `model_type`, `template_fallbacks`,
+> `sources` and `map` (`{path, sha256, bytes}`, null without `--map`).
+>
+> `--kept` reads `{"version": 1, "keep": 192, "scopes": [{"scope": "L3",
+> "experts": [0, 5, ...]}, ...]}`: every MoE layer once, each with exactly
+> `keep` unique ids in `[0, experts)`, and `keep` equal to `--keep`. A
+> draft-block scope (`D<n>`) refuses, since the pruned checkpoint carries
+> none, and so does `--skip-layers` or `--method` beside `--kept`. The
+> record's method reads `kept` and `reap_pruning.kept_plan` holds the plan
+> file's `{sha256, path}`. `reap-prune` ends with `REAP_RESULT` `out`,
+> `keep`, `experts_before`, `layers`, `skipped_layers`, `ragged`, `method`,
+> `draft_blocks_source`, `draft_blocks_carried` and `kept_plan_sha256`
+> (null without `--kept`). `tests/legwork/fixtures/keep-plan-pooled.json`,
+> written by `tests/legwork/make_keep_plan_fixture.py`, pins the pooled-REAP
+> pick a keep-plan resolver must reproduce.
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).

@@ -8,14 +8,19 @@ modifications Copyright 2026 the Legwork authors, under the same licence:
 
   - src/reap/model_util.py    the DeepseekV4ForCausalLM entry of MODEL_ATTRS
                               (and its `deepseek_v4` alias)
-  - src/reap/legwork/         the slim prune lane: the router-stats observer,
-                              the pruner (--keep, --skip-layers, the hash-table
-                              remap), the ragged-checkpoint loader, the
-                              `reap-collect` / `reap-prune` CLIs and their
-                              STAGE_PROGRESS contract
+  - src/reap/legwork/         the slim prune lane: the router-stats observer
+                              (per-source terms, the token sketch, the
+                              exemplars), the expert map, the pruner (--keep,
+                              --skip-layers, --kept, the hash-table remap),
+                              the ragged-checkpoint loader, the
+                              `reap-collect` / `reap-prune` CLIs (chat
+                              templates with tools, template fallbacks) and
+                              their STAGE_PROGRESS contract
   - tests/legwork/, tests/conftest.py
-                              the CPU suite on a tiny random DeepSeek-V4; the
-                              research suites collected only with their stack
+                              the CPU suite on a tiny random DeepSeek-V4, the
+                              pooled-REAP keep-plan fixture and its seeded
+                              generator; the research suites collected only
+                              with their stack
   - pyproject.toml            the slim dependency core (the research stack as
                               the `research` extra), the sdist contents, the
                               console scripts, this fork's version line
