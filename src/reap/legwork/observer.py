@@ -18,7 +18,8 @@ the hook sees both.
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any, Iterable, Sequence
 
 import torch
 import torch.nn as nn
@@ -27,6 +28,8 @@ import torch.nn.functional as F
 from reap.legwork.arch import MoeLayer, model_attrs, moe_layers
 
 STATS_VERSION = 1
+#: The source a sample belongs to when its row names none.
+DEFAULT_SOURCE = "unlabeled"
 
 
 def routed_expert_norms(
@@ -60,13 +63,27 @@ def routed_expert_norms(
         yield expert, weights[token_idx, slot].float(), out.float().norm(dim=-1)
 
 
+@dataclass
+class _Sample:
+    """The sample the next forward pass runs (``begin_sample``)."""
+
+    ids: torch.Tensor
+    source: str
+    private: bool
+    serial: int
+
+
 class RouterStatsObserver:
     """Hook a model's fused MoE layers and accumulate the saliency terms.
 
     ``state()`` returns a plain dict (``save_router_stats`` writes it with
     ``torch.save``): per layer ``count`` (routed hits per expert),
     ``weight_sum`` (summed router weight), ``reap_sum`` (summed
-    ``weight * ||output||``), ``max_norm`` and the layer's ``tokens``.
+    ``weight * ||output||``), ``max_norm`` and the layer's ``tokens``; top
+    level ``sources``, every source's ``{id, private, rows, tokens}``.
+
+    Call ``begin_sample(ids, source=..., private=...)`` before each forward
+    pass; a pass run without it only counts (``note_sample``).
     """
 
     def __init__(self, model: nn.Module, layers: Iterable[int] | None = None):
@@ -79,6 +96,8 @@ class RouterStatsObserver:
         if not self.layers:
             raise ValueError("no MoE layer selected for observation")
         self._state: dict[int, dict[str, Any]] = {}
+        self._sources: dict[str, dict[str, Any]] = {}
+        self._sample: _Sample | None = None
         self._hooks = [
             layer.experts.register_forward_hook(self._hook(layer)) for layer in self.layers
         ]
@@ -121,7 +140,27 @@ class RouterStatsObserver:
 
         return hook
 
+    def begin_sample(
+        self,
+        ids: Sequence[int] | torch.Tensor,
+        source: str = DEFAULT_SOURCE,
+        private: bool = False,
+    ) -> None:
+        """Name the sample the next forward pass runs — its token ids, its
+        source and whether it is private — and count it. A source is private
+        once any of its rows is."""
+        ids = torch.as_tensor(ids, dtype=torch.long).reshape(-1).cpu()
+        entry = self._sources.setdefault(
+            source, {"id": source, "private": False, "rows": 0, "tokens": 0}
+        )
+        entry["private"] = entry["private"] or bool(private)
+        entry["rows"] += 1
+        entry["tokens"] += int(ids.numel())
+        self._sample = _Sample(ids=ids, source=source, private=bool(private), serial=self.samples)
+        self.samples += 1
+
     def note_sample(self, n: int = 1) -> None:
+        """Count ``n`` samples run without ``begin_sample``."""
         self.samples += n
 
     def close(self) -> None:
@@ -139,6 +178,7 @@ class RouterStatsObserver:
             "model_class": self.model.__class__.__name__,
             "model_type": getattr(self.model.config, "model_type", None),
             "samples": self.samples,
+            "sources": [dict(entry) for _, entry in sorted(self._sources.items())],
             "layers": layers,
         }
 

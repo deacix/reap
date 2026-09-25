@@ -15,7 +15,27 @@ shapes: ``{"text": "..."}``, ``{"messages": [{"role", "content"}, ...]}``
 (pre-tokenized; needs no tokenizer). Samples run one at a time,
 truncated to ``--seq-len``, so no padding token ever enters the stats.
 
-Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``.
+A ``messages`` row may carry ``tools``: OpenAI-style function schemas
+(``{"type": "function", "function": {"name", "description",
+"parameters"}}``) the template receives as ``tools=``. Assistant turns may
+carry ``tool_calls`` (``{"type": "function", "function": {"name",
+"arguments": {...}}}``) and tool results arrive as ``{"role": "tool"}``
+turns. The rendered text keeps the template's own special tokens (no
+second BOS). When the template raises, or the tokenizer has none, the
+row is rendered as plain text instead (role headers, the contents, tool
+calls and the tools list as JSON) and counted:
+``calibration.template_fallbacks`` in the stats, ``template_fallbacks`` in
+the result.
+
+Any row may name its ``source`` (a string id, default ``"unlabeled"``) and
+whether it is ``private`` (default false; the worker marks a customer's
+own dataset rows private). Both reach the observer with the sample
+(``RouterStatsObserver.begin_sample``); the stats and the result list
+every source's rows and tokens.
+
+Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``:
+``out``, ``samples``, ``tokens``, ``layers``, ``model_type``,
+``template_fallbacks`` and ``sources`` (``[{id, private, rows, tokens}]``).
 """
 
 from __future__ import annotations
@@ -29,8 +49,11 @@ from typing import Any, Callable, Iterator
 
 import torch
 
-from reap.legwork.observer import RouterStatsObserver, save_router_stats
+from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
+
+#: How many template fallbacks are named on stderr; the rest only count.
+FALLBACK_WARNINGS = 5
 
 
 def _sha256(path: pathlib.Path) -> str:
@@ -60,14 +83,70 @@ def iter_rows(path: pathlib.Path) -> Iterator[tuple[int, dict[str, Any]]]:
             yield number, row
 
 
+def row_source(row: dict[str, Any], where: str) -> tuple[str, bool]:
+    """A row's ``(source, private)``: ``"unlabeled"`` and false unless the
+    row says otherwise (``null`` reads as absent)."""
+    source = row.get("source")
+    if source is None:
+        source = DEFAULT_SOURCE
+    elif not isinstance(source, str) or not source.strip():
+        raise ValueError(f"{where}: source is a non-empty string id")
+    private = row.get("private")
+    if private is None:
+        private = False
+    elif not isinstance(private, bool):
+        raise ValueError(f"{where}: private is true or false")
+    return source, private
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            else:
+                parts.append(_json(part))
+        return "\n".join(parts)
+    return _json(content)
+
+
+def render_plain(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> str:
+    """The template-free rendering of a ``messages`` row: the tools list as
+    JSON, then one block per turn — a ``<role>:`` header, the content, the
+    turn's tool calls as JSON."""
+    blocks: list[str] = []
+    if tools:
+        blocks.append("tools:\n" + _json(tools))
+    for message in messages:
+        lines = [f"{message.get('role')}:"]
+        content = _content_text(message.get("content"))
+        if content:
+            lines.append(content)
+        if message.get("tool_calls"):
+            lines.append(_json(message["tool_calls"]))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 class SampleEncoder:
     """Turn calibration rows into token-id lists, loading the tokenizer on
-    the first row that needs one."""
+    the first row that needs one; counts the ``messages`` rows the chat
+    template could not render (``template_fallbacks``)."""
 
     def __init__(self, model_dir: str, seq_len: int):
         self.model_dir = model_dir
         self.seq_len = seq_len
         self._tokenizer = None
+        self.template_fallbacks = 0
 
     @property
     def tokenizer(self):
@@ -77,16 +156,54 @@ class SampleEncoder:
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         return self._tokenizer
 
+    def render_messages(self, row: dict[str, Any], where: str) -> tuple[str, bool]:
+        """``(text, templated)``: the chat template's rendering, or the plain
+        one (counted) when the template raises or the tokenizer has none."""
+        messages = row["messages"]
+        if (
+            not isinstance(messages, list)
+            or not messages
+            or not all(isinstance(m, dict) and isinstance(m.get("role"), str) for m in messages)
+        ):
+            raise ValueError(f"{where}: messages is a non-empty list of {{role, content}} objects")
+        tools = row.get("tools")
+        if tools is not None and (
+            not isinstance(tools, list) or not all(isinstance(t, dict) for t in tools)
+        ):
+            raise ValueError(f"{where}: tools is a list of function schemas")
+        tokenizer = self.tokenizer
+        if getattr(tokenizer, "chat_template", None):
+            kwargs: dict[str, Any] = {"tools": tools} if tools else {}
+            try:
+                text = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False, **kwargs
+                )
+                return text, True
+            except Exception as error:  # a template raises whatever its author wrote
+                reason = f"the chat template failed ({type(error).__name__}: {str(error)[:160]})"
+        else:
+            reason = "the tokenizer has no chat template"
+        self.template_fallbacks += 1
+        if self.template_fallbacks <= FALLBACK_WARNINGS:
+            print(
+                f"reap-collect: {where}: {reason}; rendered the row as plain text",
+                file=sys.stderr,
+                flush=True,
+            )
+        return render_plain(messages, tools), False
+
     def encode(self, row: dict[str, Any], where: str) -> list[int]:
         if "input_ids" in row:
             ids = row["input_ids"]
             if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
                 raise ValueError(f"{where}: input_ids must be a list of integers")
             return ids[: self.seq_len]
+        # A template's rendering already carries the model's special tokens
+        # (transformers' own tokenize=True path adds none either).
+        add_special_tokens = True
         if "messages" in row:
-            text = self.tokenizer.apply_chat_template(
-                row["messages"], tokenize=False, add_generation_prompt=False
-            )
+            text, templated = self.render_messages(row, where)
+            add_special_tokens = not templated
         elif "text" in row:
             text = row["text"]
         elif "prompt" in row and "completion" in row:
@@ -97,7 +214,9 @@ class SampleEncoder:
             )
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"{where}: the sample text is empty")
-        encoded = self.tokenizer(text, truncation=True, max_length=self.seq_len, add_special_tokens=True)
+        encoded = self.tokenizer(
+            text, truncation=True, max_length=self.seq_len, add_special_tokens=add_special_tokens
+        )
         return list(encoded["input_ids"])
 
 
@@ -151,12 +270,14 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
             for number, row in iter_rows(calib):
                 if args.max_samples is not None and seen >= args.max_samples:
                     break
-                ids = encoder.encode(row, f"{calib}:{number}")
+                where = f"{calib}:{number}"
+                source, private = row_source(row, where)
+                ids = encoder.encode(row, where)
                 if not ids:
                     continue
                 input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+                observer.begin_sample(ids, source=source, private=private)
                 model(input_ids=input_ids, use_cache=False)
-                observer.note_sample()
                 tokens += len(ids)
                 seen += 1
                 progress(5 + 90.0 * seen / total)
@@ -169,6 +290,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "samples": seen,
         "tokens": tokens,
         "seq_len": args.seq_len,
+        "template_fallbacks": encoder.template_fallbacks,
     }
     save_router_stats(state, args.out)
     progress(100)
@@ -178,6 +300,8 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "tokens": tokens,
         "layers": sorted(state["layers"].keys()),
         "model_type": state["model_type"],
+        "template_fallbacks": encoder.template_fallbacks,
+        "sources": state["sources"],
     }
     print("REAP_RESULT " + json.dumps(result), flush=True)
     return 0
