@@ -67,14 +67,19 @@ def saliency(layer_stats: dict[str, Any], method: str = "reap") -> torch.Tensor:
     raise ValueError(f"unknown prune method {method!r}; one of {METHODS}")
 
 
+def saliency_order(scores: torch.Tensor) -> torch.Tensor:
+    """Every expert id, highest score first; ties keep the lower id (a
+    stable sort, so two runs agree). ``select_kept`` keeps a prefix."""
+    return torch.argsort(-scores.double().cpu(), stable=True)
+
+
 def select_kept(scores: torch.Tensor, keep: int) -> torch.Tensor:
     """The ``keep`` highest-scoring expert ids, ascending; ties keep the
     lower id (a stable sort, so two runs agree)."""
     num_experts = int(scores.numel())
     if not 1 <= keep <= num_experts:
         raise ValueError(f"keep must be between 1 and {num_experts}, got {keep}")
-    order = torch.argsort(-scores.double().cpu(), stable=True)
-    return order[:keep].sort().values
+    return saliency_order(scores)[:keep].sort().values
 
 
 def remap_hash_table(

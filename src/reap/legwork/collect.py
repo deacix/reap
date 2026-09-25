@@ -5,8 +5,9 @@
 CLI::
 
     python -m reap.legwork.collect --model <dir> --calib <set.jsonl> \
-        --out <router-stats.pt> [--seq-len 2048] [--max-samples N] \
-        [--layers 3,4,5] [--device cpu|cuda|auto] [--dtype auto|bfloat16|float32]
+        --out <router-stats.pt> [--map <expert-map.json.gz>] [--seq-len 2048] \
+        [--max-samples N] [--layers 3,4,5] [--device cpu|cuda|auto] \
+        [--dtype auto|bfloat16|float32]
 
 The calibration set is JSON Lines; each row is one sample in one of four
 shapes: ``{"text": "..."}``, ``{"messages": [{"role", "content"}, ...]}``
@@ -31,11 +32,20 @@ Any row may name its ``source`` (a string id, default ``"unlabeled"``) and
 whether it is ``private`` (default false; the worker marks a customer's
 own dataset rows private). Both reach the observer with the sample
 (``RouterStatsObserver.begin_sample``); the stats and the result list
-every source's rows and tokens.
+every source's rows and tokens. A private row feeds the saliency terms
+(pooled and per source) but never the top-token sketch or the exemplars.
+
+``--map`` also writes the expert map (``reap.legwork.expert_map``, gzip
+JSON): every observed expert's rank, saliency terms, per-source split,
+``protected`` flag, top tokens and exemplars, decoded with the model's
+tokenizer (loaded before the calibration starts, so a missing one fails
+fast).
 
 Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``:
 ``out``, ``samples``, ``tokens``, ``layers``, ``model_type``,
-``template_fallbacks`` and ``sources`` (``[{id, private, rows, tokens}]``).
+``template_fallbacks``, ``sources`` (``[{id, private, rows, tokens}]``) and
+``map`` (``{path, sha256, bytes}`` of the written map, ``null`` without
+``--map``).
 """
 
 from __future__ import annotations
@@ -49,6 +59,7 @@ from typing import Any, Callable, Iterator
 
 import torch
 
+from reap.legwork.expert_map import build_expert_map, write_expert_map
 from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 
@@ -238,6 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True, help="the source checkpoint directory")
     parser.add_argument("--calib", required=True, help="the calibration set (JSON Lines)")
     parser.add_argument("--out", required=True, help="where the router-stats file goes")
+    parser.add_argument("--map", default=None, help="also write the expert map here (gzip JSON)")
     parser.add_argument("--seq-len", type=int, default=2048, help="tokens per sample after truncation")
     parser.add_argument("--max-samples", type=int, default=None, help="stop after this many rows")
     parser.add_argument("--layers", default="", help="comma-separated layer indices to observe (default: every MoE layer)")
@@ -258,9 +270,18 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
     if total == 0:
         raise SystemExit(f"reap-collect: {calib} holds no calibration rows")
     progress(0)
+    encoder = SampleEncoder(args.model, args.seq_len)
+    map_tokenizer = None
+    if args.map:
+        try:
+            map_tokenizer = encoder.tokenizer
+        except Exception as error:
+            raise SystemExit(
+                f"reap-collect: --map decodes token ids with the model's tokenizer, and "
+                f"{args.model} holds none that loads ({type(error).__name__})"
+            ) from error
     model = _load_model(args.model, args.dtype, args.device)
     device = next(model.parameters()).device
-    encoder = SampleEncoder(args.model, args.seq_len)
     observer = RouterStatsObserver(model, layers or None)
     progress(5)
     tokens = 0
@@ -293,6 +314,15 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "template_fallbacks": encoder.template_fallbacks,
     }
     save_router_stats(state, args.out)
+    map_info = None
+    if args.map:
+        try:
+            map_info = write_expert_map(build_expert_map(state, map_tokenizer), args.map)
+        except ValueError as error:
+            raise SystemExit(
+                f"reap-collect: the expert map was not written ({error}); "
+                f"the router stats are at {args.out}"
+            ) from error
     progress(100)
     result = {
         "out": str(args.out),
@@ -302,6 +332,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "model_type": state["model_type"],
         "template_fallbacks": encoder.template_fallbacks,
         "sources": state["sources"],
+        "map": map_info,
     }
     print("REAP_RESULT " + json.dumps(result), flush=True)
     return 0

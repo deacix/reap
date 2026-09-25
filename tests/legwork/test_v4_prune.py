@@ -71,7 +71,7 @@ def _observe(model, samples: int = 6, seq_len: int = 16, seed: int = 3):
 def test_observer_counts_every_routed_slot():
     model = build_tiny_v4()
     state = _observe(model, samples=4, seq_len=10)
-    assert state["version"] == 1
+    assert state["version"] == 2
     assert state["model_type"] == "deepseek_v4"
     assert state["samples"] == 4
     for index in range(LAYERS):

@@ -10,7 +10,10 @@ desktop worker reads (its ``runStage`` contract) and a final
 * ``python -m reap.legwork.collect`` (``reap-collect``): run a calibration
   set through the model and record, per MoE layer and expert, the routed
   hit count, the summed router weight and the summed REAP saliency term
-  ``weight * ||expert(x)||`` -> a router-stats file.
+  ``weight * ||expert(x)||`` (pooled and per calibration source), plus the
+  token ids each expert serves most and its best routed tokens in context
+  -> a router-stats file, and with ``--map`` the expert map
+  (``reap.legwork.expert_map``, gzip JSON).
 * ``python -m reap.legwork.prune`` (``reap-prune``): rank each layer's
   experts by that saliency, keep the top ``--keep`` per layer, slice the
   fused expert tensors and the router (remapping a hash-routed layer's
@@ -23,20 +26,38 @@ the upstream entry points pull in.
 """
 
 from reap.legwork.arch import MoeLayer, hash_routed_layers, model_attrs, moe_layers
+from reap.legwork.expert_map import (
+    PROTECT_NORM_RATIO,
+    build_expert_map,
+    read_expert_map,
+    write_expert_map,
+)
 from reap.legwork.observer import RouterStatsObserver, load_router_stats, save_router_stats
-from reap.legwork.prune import PruneReport, prune_model, remap_hash_table, saliency, select_kept
+from reap.legwork.prune import (
+    PruneReport,
+    prune_model,
+    remap_hash_table,
+    saliency,
+    saliency_order,
+    select_kept,
+)
 
 __all__ = [
     "MoeLayer",
+    "PROTECT_NORM_RATIO",
     "PruneReport",
     "RouterStatsObserver",
+    "build_expert_map",
     "hash_routed_layers",
     "load_router_stats",
     "model_attrs",
     "moe_layers",
     "prune_model",
+    "read_expert_map",
     "remap_hash_table",
     "saliency",
+    "saliency_order",
     "save_router_stats",
     "select_kept",
+    "write_expert_map",
 ]
