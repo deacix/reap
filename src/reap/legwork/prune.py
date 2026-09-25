@@ -14,24 +14,45 @@ layers at full width; that checkpoint is *ragged*, reloads only through
 ``reap.legwork.load.load_pruned`` and does not serve on vLLM, so the CLI
 says so and records the per-layer widths in ``reap_pruning``.
 
+``--kept <kept.json>`` names the experts instead of ranking them (the API
+resolves keep plans; the fork only slices). Every MoE layer keeps exactly
+its listed ids, sorted ascending before the slice; a hash-routed layer is
+remapped as above. ``--stats`` becomes optional, the method reads
+``"kept"`` and the record carries the plan's sha256. The file::
+
+    {"version": 1, "keep": 192,
+     "scopes": [{"scope": "L3", "experts": [0, 5, 7, ...]}, ...]}
+
+lists every MoE layer once as ``L<layer>``, each with exactly ``keep``
+unique expert ids in ``[0, experts)``; ``keep`` must equal ``--keep``. A
+draft-block scope (``D<n>``) refuses, since the pruned checkpoint carries
+no draft blocks, and so does ``--skip-layers`` beside ``--kept``.
+
 CLI::
 
     python -m reap.legwork.prune --model <dir> --stats <router-stats.pt> \
         --out <dir> --keep 192 [--skip-layers 0,1,2] [--method reap]
+    python -m reap.legwork.prune --model <dir> --kept <kept.json> \
+        --out <dir> --keep 192 [--stats <router-stats.pt>]
 
-Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``.
+Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``:
+``out``, ``keep``, ``experts_before``, ``layers``, ``skipped_layers``,
+``ragged``, ``method``, ``draft_blocks_source``, ``draft_blocks_carried``
+and ``kept_plan_sha256`` (``null`` without ``--kept``).
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+import hashlib
 import json
 import pathlib
 import re
 import shutil
 import sys
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import torch
 import torch.nn as nn
@@ -42,6 +63,11 @@ from reap.legwork.observer import load_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 
 METHODS = ("reap", "frequency", "weighted_frequency")
+#: The method a pruning record names when a kept plan chose the experts.
+KEPT_METHOD = "kept"
+KEPT_PLAN_VERSION = 1
+LAYER_SCOPE = re.compile(r"L(0|[1-9][0-9]*)")
+DRAFT_SCOPE = re.compile(r"D(0|[1-9][0-9]*)")
 TOKENIZER_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -80,6 +106,106 @@ def select_kept(scores: torch.Tensor, keep: int) -> torch.Tensor:
     if not 1 <= keep <= num_experts:
         raise ValueError(f"keep must be between 1 and {num_experts}, got {keep}")
     return saliency_order(scores)[:keep].sort().values
+
+
+_KEPT_WITH_SKIP_LAYERS = "--kept lists every MoE layer's experts, so it cannot be combined with --skip-layers"
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_kept_plan(plan: Any, keep: int) -> dict[int, list[int]]:
+    """A kept plan's expert ids per MoE layer index, ascending, after every
+    check that needs no model: version 1, ``keep`` equal to ``--keep``, each
+    scope an ``L<layer>`` named once with exactly ``keep`` unique
+    non-negative integer ids. ``ValueError`` names the first problem;
+    ``resolve_kept_plan`` checks the rest against the model."""
+    if not isinstance(plan, dict):
+        raise ValueError("the plan is not a JSON object")
+    version = plan.get("version")
+    if not _is_int(version) or version != KEPT_PLAN_VERSION:
+        raise ValueError(f"the plan's version is {version!r}; reap-prune reads version {KEPT_PLAN_VERSION}")
+    plan_keep = plan.get("keep")
+    if not _is_int(plan_keep):
+        raise ValueError(f"the plan's keep is {plan_keep!r}, not an expert count")
+    if plan_keep != keep:
+        raise ValueError(f"the plan keeps {plan_keep} experts per scope, --keep is {keep}")
+    scopes = plan.get("scopes")
+    if not isinstance(scopes, list):
+        raise ValueError("the plan's scopes are not a list")
+    kept: dict[int, list[int]] = {}
+    for position, entry in enumerate(scopes):
+        scope = entry.get("scope") if isinstance(entry, dict) else None
+        if not isinstance(scope, str):
+            raise ValueError(f"scopes[{position}] names no scope")
+        if DRAFT_SCOPE.fullmatch(scope):
+            raise ValueError(
+                f"scope {scope} is a draft block: the pruned checkpoint carries no draft blocks, "
+                "so a kept plan cannot name one"
+            )
+        match = LAYER_SCOPE.fullmatch(scope)
+        if match is None:
+            raise ValueError(f"scope {scope!r} is unknown; a kept plan names MoE layers as L<layer>")
+        layer = int(match.group(1))
+        if layer in kept:
+            raise ValueError(f"scope {scope} is listed twice")
+        experts = entry.get("experts")
+        if not isinstance(experts, list):
+            raise ValueError(f"scope {scope}: experts is not a list of expert ids")
+        for expert in experts:
+            if not _is_int(expert):
+                raise ValueError(f"scope {scope}: expert id {expert!r} is not an integer")
+            if expert < 0:
+                raise ValueError(f"scope {scope}: expert {expert} is out of range")
+        twice = sorted(expert for expert, n in collections.Counter(experts).items() if n > 1)
+        if twice:
+            raise ValueError(f"scope {scope}: experts {twice} are listed twice")
+        if len(experts) != keep:
+            raise ValueError(f"scope {scope}: {len(experts)} experts listed, the plan keeps {keep}")
+        kept[layer] = sorted(experts)
+    return kept
+
+
+def resolve_kept_plan(plan: Any, layers: Sequence[MoeLayer], keep: int) -> dict[int, torch.Tensor]:
+    """A kept plan checked whole against the model's MoE ``layers``:
+    ``parse_kept_plan``, then every MoE layer listed and no other, each id
+    below its layer's width. Returns the ids per layer index, ascending."""
+    kept = parse_kept_plan(plan, keep)
+    widths = {layer.index: layer.num_experts for layer in layers}
+    unknown = sorted(set(kept) - set(widths))
+    if unknown:
+        raise ValueError(
+            f"scope L{unknown[0]} is unknown: the model has no MoE layer {unknown[0]} "
+            f"(its MoE layers are {sorted(widths)})"
+        )
+    missing = sorted(set(widths) - set(kept))
+    if missing:
+        raise ValueError(f"the plan lists no experts for MoE layers {missing}; it must name every MoE layer")
+    resolved: dict[int, torch.Tensor] = {}
+    for index in sorted(kept):
+        beyond = [expert for expert in kept[index] if expert >= widths[index]]
+        if beyond:
+            raise ValueError(
+                f"scope L{index}: expert {beyond[0]} is out of range; "
+                f"layer {index} has {widths[index]} experts"
+            )
+        resolved[index] = torch.tensor(kept[index], dtype=torch.long)
+    return resolved
+
+
+def read_kept_plan(path: str | pathlib.Path, keep: int) -> tuple[dict[str, Any], str]:
+    """``--kept``'s file: the plan, checked by ``parse_kept_plan``, and the
+    sha256 of its bytes (the record and REAP_RESULT carry it)."""
+    data = pathlib.Path(path).read_bytes()
+    try:
+        plan = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"the plan is not JSON (line {error.lineno}, column {error.colno})") from error
+    except UnicodeDecodeError as error:
+        raise ValueError("the plan is not UTF-8 text") from error
+    parse_kept_plan(plan, keep)
+    return plan, hashlib.sha256(data).hexdigest()
 
 
 def remap_hash_table(
@@ -189,13 +315,18 @@ class PruneReport:
 
 def prune_model(
     model: nn.Module,
-    stats: dict[str, Any],
+    stats: dict[str, Any] | None,
     keep: int,
     skip_layers: Any = (),
     method: str = "reap",
     progress: Callable[[float], None] | None = None,
+    kept_plan: dict[str, Any] | None = None,
 ) -> PruneReport:
-    """Prune ``model`` in place; returns the report the checkpoint records."""
+    """Prune ``model`` in place; returns the report the checkpoint records.
+
+    ``kept_plan`` (the parsed ``kept.json``) replaces the ranking: every MoE
+    layer keeps exactly its listed experts, ``stats`` may be ``None`` and
+    the report's method is ``KEPT_METHOD``."""
     attrs = model_attrs(model)
     layers = moe_layers(model)
     experts_before = num_routed_experts(model)
@@ -209,9 +340,17 @@ def prune_model(
     unknown = [i for i in skipped if i not in known]
     if unknown:
         raise ValueError(f"--skip-layers names layers without an MoE block: {unknown}")
-    if method not in METHODS:
+    plan: dict[int, torch.Tensor] | None = None
+    if kept_plan is not None:
+        if skipped:
+            raise ValueError(_KEPT_WITH_SKIP_LAYERS)
+        plan = resolve_kept_plan(kept_plan, layers, keep)
+        method = KEPT_METHOD
+    elif stats is None:
+        raise ValueError("pruning ranks the experts from router stats; pass stats or a kept plan")
+    elif method not in METHODS:
         raise ValueError(f"unknown prune method {method!r}; one of {METHODS}")
-    layer_stats = stats.get("layers", {})
+    layer_stats = (stats or {}).get("layers", {})
     report = PruneReport(method=method, keep=keep, experts_before=experts_before, skipped_layers=skipped)
     total = len(layers)
     for position, layer in enumerate(layers):
@@ -220,15 +359,18 @@ def prune_model(
                 PrunedLayer(layer.index, layer.kind, layer.num_experts, list(range(layer.num_experts)), True)
             )
         else:
-            this = layer_stats.get(layer.index)
-            if this is None:
-                raise ValueError(f"the router stats carry no layer {layer.index}; re-run collect")
-            if int(this["num_experts"]) != layer.num_experts:
-                raise ValueError(
-                    f"layer {layer.index}: the stats were recorded over {this['num_experts']} experts, "
-                    f"the model has {layer.num_experts}"
-                )
-            kept = select_kept(saliency(this, method), keep)
+            if plan is not None:
+                kept = plan[layer.index]
+            else:
+                this = layer_stats.get(layer.index)
+                if this is None:
+                    raise ValueError(f"the router stats carry no layer {layer.index}; re-run collect")
+                if int(this["num_experts"]) != layer.num_experts:
+                    raise ValueError(
+                        f"layer {layer.index}: the stats were recorded over {this['num_experts']} experts, "
+                        f"the model has {layer.num_experts}"
+                    )
+                kept = select_kept(saliency(this, method), keep)
             prune_layer(layer, kept, attrs)
             report.layers.append(PrunedLayer(layer.index, layer.kind, experts_before, kept.tolist()))
         if progress is not None:
@@ -314,7 +456,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="reap-prune", description="Prune a fused-experts checkpoint with REAP saliency."
     )
     parser.add_argument("--model", required=True, help="the source checkpoint directory")
-    parser.add_argument("--stats", required=True, help="the router-stats file reap-collect wrote")
+    parser.add_argument(
+        "--stats", default=None, help="the router-stats file reap-collect wrote (optional with --kept)"
+    )
+    parser.add_argument(
+        "--kept",
+        default=None,
+        help="a kept plan (JSON): the expert ids every MoE layer keeps, instead of ranking them",
+    )
     parser.add_argument("--out", required=True, help="the pruned checkpoint directory")
     parser.add_argument("--keep", required=True, type=int, help="routed experts kept per layer")
     parser.add_argument(
@@ -323,7 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated layer indices left at full width (a ragged checkpoint; "
         "reloads through reap.legwork.load only, never serves on vLLM)",
     )
-    parser.add_argument("--method", default="reap", choices=METHODS)
+    parser.add_argument(
+        "--method", default=None, choices=METHODS, help="the saliency ranking (default reap); not with --kept"
+    )
     parser.add_argument("--dtype", default="auto", choices=("auto", "float32", "bfloat16", "float16"))
     parser.add_argument("--device", default="cpu", help="cpu, cuda, cuda:N or auto (accelerate device_map)")
     return parser
@@ -332,18 +483,39 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, progress: Callable[[float], None] = stage_progress) -> int:
     args = build_parser().parse_args(argv)
     skip = parse_layer_list(args.skip_layers)
+    kept_plan: dict[str, Any] | None = None
+    kept_plan_sha256: str | None = None
+    if args.kept is not None:
+        if skip:
+            raise SystemExit(f"reap-prune: {_KEPT_WITH_SKIP_LAYERS}")
+        if args.method is not None:
+            raise SystemExit("reap-prune: --kept names the experts and --method ranks them; pass one")
+        try:
+            kept_plan, kept_plan_sha256 = read_kept_plan(args.kept, args.keep)
+        except OSError as error:
+            raise SystemExit(
+                f"reap-prune: --kept {args.kept} cannot be read ({error.strerror or type(error).__name__})"
+            ) from error
+        except ValueError as error:
+            raise SystemExit(f"reap-prune: --kept {args.kept}: {error}") from error
+    elif args.stats is None:
+        raise SystemExit("reap-prune: --stats is required unless --kept names the experts")
     progress(0)
-    stats = load_router_stats(args.stats)
+    stats = load_router_stats(args.stats) if args.stats is not None else None
     model = _load_model(args.model, args.dtype, args.device)
     progress(10)
-    report = prune_model(
-        model,
-        stats,
-        keep=args.keep,
-        skip_layers=skip,
-        method=args.method,
-        progress=lambda pct: progress(10 + pct * 0.7),
-    )
+    try:
+        report = prune_model(
+            model,
+            stats,
+            keep=args.keep,
+            skip_layers=skip,
+            method=args.method or "reap",
+            progress=lambda pct: progress(10 + pct * 0.7),
+            kept_plan=kept_plan,
+        )
+    except ValueError as error:
+        raise SystemExit(f"reap-prune: {error}") from error
     if report.ragged:
         print(
             f"reap-prune: layers {report.skipped_layers} kept their full width — the checkpoint is "
@@ -360,8 +532,11 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         source_dir=args.model,
         extra_record={
             "source": str(args.model),
-            "stats": str(args.stats),
-            "calibration": stats.get("calibration"),
+            "stats": None if args.stats is None else str(args.stats),
+            "calibration": None if stats is None else stats.get("calibration"),
+            "kept_plan": None
+            if kept_plan is None
+            else {"sha256": kept_plan_sha256, "path": str(args.kept)},
         },
     )
     progress(100)
@@ -375,6 +550,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "method": report.method,
         "draft_blocks_source": source_draft_blocks(args.model),
         "draft_blocks_carried": 0,
+        "kept_plan_sha256": kept_plan_sha256,
     }
     print("REAP_RESULT " + json.dumps(result), flush=True)
     return 0

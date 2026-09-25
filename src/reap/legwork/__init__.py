@@ -15,10 +15,11 @@ desktop worker reads (its ``runStage`` contract) and a final
   -> a router-stats file, and with ``--map`` the expert map
   (``reap.legwork.expert_map``, gzip JSON).
 * ``python -m reap.legwork.prune`` (``reap-prune``): rank each layer's
-  experts by that saliency, keep the top ``--keep`` per layer, slice the
-  fused expert tensors and the router (remapping a hash-routed layer's
-  ``tid2eid`` table onto the kept set), save the checkpoint with a
-  ``reap_pruning`` record in its ``config.json``.
+  experts by that saliency, keep the top ``--keep`` per layer (or exactly
+  the ids a ``--kept`` plan lists), slice the fused expert tensors and the
+  router (remapping a hash-routed layer's ``tid2eid`` table onto the kept
+  set), save the checkpoint with a ``reap_pruning`` record in its
+  ``config.json``.
 
 The lane imports only torch, transformers, accelerate, safetensors and
 huggingface_hub — none of the research stack (vLLM, lm-eval, datasets)
@@ -35,7 +36,9 @@ from reap.legwork.expert_map import (
 from reap.legwork.observer import RouterStatsObserver, load_router_stats, save_router_stats
 from reap.legwork.prune import (
     PruneReport,
+    parse_kept_plan,
     prune_model,
+    read_kept_plan,
     remap_hash_table,
     saliency,
     saliency_order,
@@ -52,8 +55,10 @@ __all__ = [
     "load_router_stats",
     "model_attrs",
     "moe_layers",
+    "parse_kept_plan",
     "prune_model",
     "read_expert_map",
+    "read_kept_plan",
     "remap_hash_table",
     "saliency",
     "saliency_order",

@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "about": "Pooled-REAP parity for kept plans (deacix/legwork#23171). expected is the kept.json reap-prune --kept reads, and the plan the API's keep-plan resolver must return for these scopes with weights. Generated: edit the generator, never this file.",
+  "generator": "tests/legwork/make_keep_plan_fixture.py",
+  "seed": 23167,
+  "rule": "Per scope an expert's score is the sum of its bySource reapSums over the sum of its bySource counts, 0 when no source reached it. expected keeps the keep highest scores, ties to the lower id, listed ascending; rank is the 1-based place in that order. The weighted score with weights (the sources' token shares) is the same double.",
+  "keep": 4,
+  "experts": 8,
+  "topK": 2,
+  "sources": [
+    {"id": "code", "kind": "corpus", "rows": 4, "tokens": 512},
+    {"id": "chat", "kind": "corpus", "rows": 2, "tokens": 256},
+    {"id": "mine", "kind": "dataset", "rows": 2, "tokens": 256}
+  ],
+  "weights": {
+    "code": 0.5,
+    "chat": 0.25,
+    "mine": 0.25
+  },
+  "scopes": [
+    {
+      "scope": "L0",
+      "case": "Experts 1 and 6 were reached by no source: each scores 0 (never NaN), and they rank last, the lower id first.",
+      "experts": [
+        {"id": 0, "rank": 5, "count": 439, "reapSum": 435.3125, "protected": false, "bySource": {"code": [171, 203.0625], "chat": [140, 96.25], "mine": [128, 136.0]}},
+        {"id": 1, "rank": 7, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 2, "rank": 2, "count": 346, "reapSum": 696.375, "protected": false, "bySource": {"code": [171, 406.125], "chat": [47, 82.25], "mine": [128, 208.0]}},
+        {"id": 3, "rank": 1, "count": 225, "reapSum": 501.25, "protected": false, "bySource": {"code": [85, 212.5], "chat": [140, 288.75]}},
+        {"id": 4, "rank": 6, "count": 281, "reapSum": 200.375, "protected": false, "bySource": {"code": [171, 106.875], "chat": [46, 57.5], "mine": [64, 36.0]}},
+        {"id": 5, "rank": 4, "count": 327, "reapSum": 365.5, "protected": false, "bySource": {"code": [170, 74.375], "chat": [93, 151.125], "mine": [64, 140.0]}},
+        {"id": 6, "rank": 8, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 7, "rank": 3, "count": 430, "reapSum": 837.375, "protected": false, "bySource": {"code": [256, 544.0], "chat": [46, 37.375], "mine": [128, 256.0]}}
+      ],
+      "alone": {
+        "code": [0, 2, 3, 7],
+        "chat": [2, 3, 4, 5],
+        "mine": [0, 2, 5, 7]
+      }
+    },
+    {
+      "scope": "L1",
+      "case": "Experts 3 and 5 tie exactly on the keep boundary (225 / 160 each, from different per-source splits): the lower id, 3, is kept.",
+      "experts": [
+        {"id": 0, "rank": 3, "count": 360, "reapSum": 525.75, "protected": false, "bySource": {"code": [230, 287.5], "chat": [83, 197.125], "mine": [47, 41.125]}},
+        {"id": 1, "rank": 8, "count": 330, "reapSum": 218.5625, "protected": false, "bySource": {"code": [153, 153.0], "chat": [82, 35.875], "mine": [95, 29.6875]}},
+        {"id": 2, "rank": 6, "count": 359, "reapSum": 447.0, "protected": false, "bySource": {"code": [230, 186.875], "chat": [82, 189.625], "mine": [47, 70.5]}},
+        {"id": 3, "rank": 4, "count": 160, "reapSum": 225.0, "protected": false, "bySource": {"code": [120, 180.0], "chat": [40, 45.0]}},
+        {"id": 4, "rank": 1, "count": 199, "reapSum": 384.875, "protected": false, "bySource": {"code": [77, 96.25], "chat": [28, 59.5], "mine": [94, 229.125]}},
+        {"id": 5, "rank": 5, "count": 160, "reapSum": 225.0, "protected": false, "bySource": {"code": [60, 75.0], "chat": [60, 90.0], "mine": [40, 60.0]}},
+        {"id": 6, "rank": 7, "count": 274, "reapSum": 210.5, "protected": false, "bySource": {"code": [77, 48.125], "chat": [55, 82.5], "mine": [142, 79.875]}},
+        {"id": 7, "rank": 2, "count": 206, "reapSum": 316.1875, "protected": false, "bySource": {"code": [77, 28.875], "chat": [82, 184.5], "mine": [47, 102.8125]}}
+      ],
+      "alone": {
+        "code": [0, 3, 4, 5],
+        "chat": [0, 2, 4, 7],
+        "mine": [2, 4, 5, 7]
+      }
+    },
+    {
+      "scope": "L2",
+      "case": "Expert 6 was reached by one source alone (chat): its bySource holds one entry, and its score keeps it.",
+      "experts": [
+        {"id": 0, "rank": 5, "count": 309, "reapSum": 564.125, "protected": false, "bySource": {"code": [181, 429.875], "chat": [71, 66.5625], "mine": [57, 67.6875]}},
+        {"id": 1, "rank": 6, "count": 373, "reapSum": 646.625, "protected": false, "bySource": {"code": [181, 384.625], "chat": [106, 192.125], "mine": [86, 69.875]}},
+        {"id": 2, "rank": 7, "count": 275, "reapSum": 408.75, "protected": false, "bySource": {"code": [120, 45.0], "chat": [70, 161.875], "mine": [85, 201.875]}},
+        {"id": 3, "rank": 2, "count": 212, "reapSum": 451.625, "protected": false, "bySource": {"code": [120, 255.0], "chat": [35, 61.25], "mine": [57, 135.375]}},
+        {"id": 4, "rank": 3, "count": 301, "reapSum": 632.6875, "protected": false, "bySource": {"code": [181, 429.875], "chat": [35, 70.0], "mine": [85, 132.8125]}},
+        {"id": 5, "rank": 4, "count": 308, "reapSum": 617.3125, "protected": false, "bySource": {"code": [181, 362.0], "chat": [70, 166.25], "mine": [57, 89.0625]}},
+        {"id": 6, "rank": 1, "count": 90, "reapSum": 202.5, "protected": false, "bySource": {"chat": [90, 202.5]}},
+        {"id": 7, "rank": 8, "count": 180, "reapSum": 82.8125, "protected": false, "bySource": {"code": [60, 30.0], "chat": [35, 26.25], "mine": [85, 26.5625]}}
+      ],
+      "alone": {
+        "code": [0, 1, 3, 4],
+        "chat": [2, 4, 5, 6],
+        "mine": [2, 3, 4, 5]
+      }
+    },
+    {
+      "scope": "L3",
+      "case": "Pooling changes the pick: the kept set differs from the one each source alone would keep (see alone).",
+      "experts": [
+        {"id": 0, "rank": 5, "count": 385, "reapSum": 564.375, "protected": false, "bySource": {"code": [154, 134.75], "chat": [91, 193.375], "mine": [140, 236.25]}},
+        {"id": 1, "rank": 2, "count": 214, "reapSum": 385.25, "protected": false, "bySource": {"code": [154, 250.25], "chat": [60, 135.0]}},
+        {"id": 2, "rank": 8, "count": 291, "reapSum": 232.0, "protected": false, "bySource": {"code": [154, 163.625], "chat": [91, 56.875], "mine": [46, 11.5]}},
+        {"id": 3, "rank": 3, "count": 244, "reapSum": 436.75, "protected": false, "bySource": {"code": [154, 211.75], "chat": [90, 225.0]}},
+        {"id": 4, "rank": 1, "count": 272, "reapSum": 542.375, "protected": false, "bySource": {"code": [102, 248.625], "chat": [30, 22.5], "mine": [140, 271.25]}},
+        {"id": 5, "rank": 4, "count": 178, "reapSum": 263.875, "protected": false, "bySource": {"code": [102, 127.5], "chat": [30, 30.0], "mine": [46, 106.375]}},
+        {"id": 6, "rank": 6, "count": 243, "reapSum": 349.875, "protected": false, "bySource": {"code": [153, 153.0], "chat": [90, 196.875]}},
+        {"id": 7, "rank": 7, "count": 221, "reapSum": 198.125, "protected": false, "bySource": {"code": [51, 95.625], "chat": [30, 67.5], "mine": [140, 35.0]}}
+      ],
+      "alone": {
+        "code": [1, 3, 4, 7],
+        "chat": [1, 3, 6, 7],
+        "mine": [0, 2, 4, 5]
+      }
+    },
+    {
+      "scope": "L4",
+      "case": "Only experts 2, 5 and 7 were reached, fewer than keep: the score-0 tie for the last slot goes to the lowest id, 0.",
+      "experts": [
+        {"id": 0, "rank": 4, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 1, "rank": 5, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 2, "rank": 3, "count": 647, "reapSum": 583.25, "protected": false, "bySource": {"code": [256, 64.0], "chat": [220, 220.0], "mine": [171, 299.25]}},
+        {"id": 3, "rank": 6, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 4, "rank": 7, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 5, "rank": 1, "count": 829, "reapSum": 1551.9375, "protected": false, "bySource": {"code": [512, 1120.0], "chat": [146, 36.5], "mine": [171, 395.4375]}},
+        {"id": 6, "rank": 8, "count": 0, "reapSum": 0.0, "protected": false, "bySource": {}},
+        {"id": 7, "rank": 2, "count": 572, "reapSum": 1001.0, "protected": false, "bySource": {"code": [256, 448.0], "chat": [146, 255.5], "mine": [170, 297.5]}}
+      ],
+      "alone": {
+        "code": [0, 2, 5, 7],
+        "chat": [0, 2, 5, 7],
+        "mine": [0, 2, 5, 7]
+      }
+    },
+    {
+      "scope": "L5",
+      "case": "Expert 1 was routed the most and holds the largest reapSum, but its mean is the lowest: REAP ranks the mean, so it is dropped.",
+      "experts": [
+        {"id": 0, "rank": 5, "count": 181, "reapSum": 168.75, "protected": false, "bySource": {"code": [133, 99.75], "chat": [48, 69.0]}},
+        {"id": 1, "rank": 7, "count": 800, "reapSum": 403.125, "protected": false, "bySource": {"code": [450, 225.0], "chat": [200, 112.5], "mine": [150, 65.625]}},
+        {"id": 2, "rank": 8, "count": 92, "reapSum": 31.5, "protected": false, "bySource": {"code": [44, 16.5], "chat": [48, 15.0]}},
+        {"id": 3, "rank": 1, "count": 189, "reapSum": 345.4375, "protected": false, "bySource": {"code": [44, 38.5], "chat": [24, 12.0], "mine": [121, 294.9375]}},
+        {"id": 4, "rank": 4, "count": 262, "reapSum": 252.8125, "protected": false, "bySource": {"code": [133, 157.9375], "chat": [48, 24.0], "mine": [81, 70.875]}},
+        {"id": 5, "rank": 3, "count": 192, "reapSum": 325.0, "protected": false, "bySource": {"code": [88, 154.0], "chat": [24, 36.0], "mine": [80, 135.0]}},
+        {"id": 6, "rank": 6, "count": 176, "reapSum": 159.5, "protected": false, "bySource": {"code": [88, 33.0], "chat": [48, 84.0], "mine": [40, 42.5]}},
+        {"id": 7, "rank": 2, "count": 156, "reapSum": 267.25, "protected": false, "bySource": {"code": [44, 35.75], "chat": [72, 166.5], "mine": [40, 65.0]}}
+      ],
+      "alone": {
+        "code": [3, 4, 5, 7],
+        "chat": [0, 5, 6, 7],
+        "mine": [3, 5, 6, 7]
+      }
+    },
+    {
+      "scope": "L6",
+      "case": "A seeded draw with no constructed case.",
+      "experts": [
+        {"id": 0, "rank": 3, "count": 318, "reapSum": 624.9375, "protected": false, "bySource": {"code": [171, 384.75], "chat": [96, 186.0], "mine": [51, 54.1875]}},
+        {"id": 1, "rank": 6, "count": 388, "reapSum": 363.375, "protected": false, "bySource": {"code": [170, 106.25], "chat": [64, 132.0], "mine": [154, 125.125]}},
+        {"id": 2, "rank": 2, "count": 197, "reapSum": 392.375, "protected": false, "bySource": {"code": [114, 285.0], "chat": [32, 50.0], "mine": [51, 57.375]}},
+        {"id": 3, "rank": 1, "count": 261, "reapSum": 612.0, "protected": false, "bySource": {"code": [114, 263.625], "chat": [96, 240.0], "mine": [51, 108.375]}},
+        {"id": 4, "rank": 5, "count": 275, "reapSum": 289.9375, "protected": false, "bySource": {"code": [57, 103.3125], "chat": [64, 100.0], "mine": [154, 86.625]}},
+        {"id": 5, "rank": 4, "count": 234, "reapSum": 414.625, "protected": false, "bySource": {"code": [170, 350.625], "chat": [64, 64.0]}},
+        {"id": 6, "rank": 7, "count": 197, "reapSum": 153.375, "protected": false, "bySource": {"code": [114, 49.875], "chat": [32, 78.0], "mine": [51, 25.5]}},
+        {"id": 7, "rank": 8, "count": 178, "reapSum": 97.875, "protected": false, "bySource": {"code": [114, 49.875], "chat": [64, 48.0]}}
+      ],
+      "alone": {
+        "code": [0, 2, 3, 5],
+        "chat": [0, 1, 3, 6],
+        "mine": [0, 1, 2, 3]
+      }
+    },
+    {
+      "scope": "L7",
+      "case": "A seeded draw with no constructed case.",
+      "experts": [
+        {"id": 0, "rank": 1, "count": 203, "reapSum": 358.375, "protected": false, "bySource": {"code": [57, 121.125], "chat": [73, 114.0625], "mine": [73, 123.1875]}},
+        {"id": 1, "rank": 6, "count": 261, "reapSum": 260.0625, "protected": false, "bySource": {"code": [114, 28.5], "chat": [110, 220.0], "mine": [37, 11.5625]}},
+        {"id": 2, "rank": 3, "count": 354, "reapSum": 513.0, "protected": false, "bySource": {"code": [171, 288.5625], "chat": [73, 31.9375], "mine": [110, 192.5]}},
+        {"id": 3, "rank": 8, "count": 151, "reapSum": 65.6875, "protected": false, "bySource": {"code": [114, 35.625], "chat": [37, 30.0625]}},
+        {"id": 4, "rank": 7, "count": 317, "reapSum": 280.9375, "protected": false, "bySource": {"code": [170, 138.125], "chat": [37, 80.9375], "mine": [110, 61.875]}},
+        {"id": 5, "rank": 2, "count": 316, "reapSum": 480.125, "protected": false, "bySource": {"code": [170, 286.875], "chat": [110, 110.0], "mine": [36, 83.25]}},
+        {"id": 6, "rank": 5, "count": 223, "reapSum": 223.3125, "protected": false, "bySource": {"code": [114, 114.0], "chat": [36, 13.5], "mine": [73, 95.8125]}},
+        {"id": 7, "rank": 4, "count": 223, "reapSum": 250.3125, "protected": false, "bySource": {"code": [114, 171.0], "chat": [36, 38.25], "mine": [73, 41.0625]}}
+      ],
+      "alone": {
+        "code": [0, 2, 5, 7],
+        "chat": [0, 1, 4, 7],
+        "mine": [0, 2, 5, 6]
+      }
+    }
+  ],
+  "expected": {
+    "version": 1,
+    "keep": 4,
+    "scopes": [
+      {"scope": "L0", "experts": [2, 3, 5, 7]},
+      {"scope": "L1", "experts": [0, 3, 4, 7]},
+      {"scope": "L2", "experts": [3, 4, 5, 6]},
+      {"scope": "L3", "experts": [1, 3, 4, 5]},
+      {"scope": "L4", "experts": [0, 2, 5, 7]},
+      {"scope": "L5", "experts": [3, 4, 5, 7]},
+      {"scope": "L6", "experts": [0, 2, 3, 5]},
+      {"scope": "L7", "experts": [0, 2, 5, 7]}
+    ]
+  }
+}

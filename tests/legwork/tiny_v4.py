@@ -1,8 +1,8 @@
 # Copyright 2026 the Legwork authors (deacix/reap, the `legwork` branch).
 # Modifications to REAP (Copyright 2025 Cerebras Systems), Apache-2.0.
 """The Legwork lane's CPU fixture: a tiny random DeepSeek-V4 (2 layers,
-8 routed experts, hidden 64, layer 0 hash-routed) and a word-level
-tokenizer over its vocabulary."""
+8 routed experts, hidden 64, layer 0 hash-routed; ``mlp_layer_types`` sets
+another depth and mix) and a word-level tokenizer over its vocabulary."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ def tiny_v4_config(mlp_layer_types=("hash_moe", "moe"), experts=EXPERTS, top_k=T
         vocab_size=VOCAB,
         hidden_size=HIDDEN,
         moe_intermediate_size=32,
-        num_hidden_layers=LAYERS,
         num_attention_heads=4,
         num_key_value_heads=1,
         head_dim=32,
@@ -38,6 +37,7 @@ def tiny_v4_config(mlp_layer_types=("hash_moe", "moe"), experts=EXPERTS, top_k=T
         index_head_dim=16,
         index_topk=8,
         sliding_window=16,
+        num_hidden_layers=len(mlp_layer_types),
         mlp_layer_types=list(mlp_layer_types),
         num_nextn_predict_layers=0,
         bos_token_id=1,
@@ -46,11 +46,13 @@ def tiny_v4_config(mlp_layer_types=("hash_moe", "moe"), experts=EXPERTS, top_k=T
     )
 
 
-def build_tiny_v4(seed: int = 0, experts: int = EXPERTS, top_k: int = TOP_K):
+def build_tiny_v4(
+    seed: int = 0, experts: int = EXPERTS, top_k: int = TOP_K, mlp_layer_types=("hash_moe", "moe")
+):
     from transformers import DeepseekV4ForCausalLM
 
     torch.manual_seed(seed)
-    model = DeepseekV4ForCausalLM(tiny_v4_config(experts=experts, top_k=top_k)).eval()
+    model = DeepseekV4ForCausalLM(tiny_v4_config(mlp_layer_types, experts=experts, top_k=top_k)).eval()
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for layer in model.model.layers:

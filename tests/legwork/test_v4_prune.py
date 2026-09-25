@@ -265,10 +265,12 @@ def test_the_two_clis_emit_progress_lines_and_a_result(tmp_path, tiny_v4_dir, ca
         "method": "reap",
         "draft_blocks_source": 0,
         "draft_blocks_carried": 0,
+        "kept_plan_sha256": None,
     }
     record = read_pruning_record(out_dir)
     assert record["calibration"]["samples"] == 12
     assert record["source"] == str(tiny_v4_dir)
+    assert record["kept_plan"] is None
 
     ragged = _run(
         "reap.legwork.prune",
