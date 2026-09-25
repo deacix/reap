@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import shutil
 import sys
 from dataclasses import asdict, dataclass, field
@@ -231,6 +232,31 @@ def prune_model(
     return report
 
 
+DRAFT_BLOCK = re.compile(r"^mtp\.(\d+)\.")
+
+
+def source_draft_blocks(source_dir: str | pathlib.Path | None) -> int:
+    """How many DSpark draft blocks (``mtp.<n>.*`` tensors) the source
+    checkpoint carries. transformers' DeepSeek-V4 model never builds them and
+    ignores them on load, so a pruned checkpoint written from it carries
+    none (deacix/legwork#23177): the record says so instead of implying they
+    were kept."""
+    if source_dir is None:
+        return 0
+    src = pathlib.Path(source_dir)
+    names: list[str] = []
+    index = src / "model.safetensors.index.json"
+    if index.is_file():
+        names = list(json.loads(index.read_text(encoding="utf-8")).get("weight_map", {}))
+    else:
+        from safetensors import safe_open
+
+        for shard in sorted(src.glob("*.safetensors")):
+            with safe_open(str(shard), framework="pt") as handle:
+                names.extend(handle.keys())
+    return len({match.group(1) for name in names if (match := DRAFT_BLOCK.match(name))})
+
+
 def write_pruning_record(out_dir: str | pathlib.Path, record: dict[str, Any]) -> None:
     config_path = pathlib.Path(out_dir) / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -255,6 +281,7 @@ def save_pruned(
             if candidate.is_file() and not (out / name).exists():
                 shutil.copy2(candidate, out / name)
     record = report.to_record()
+    record["draft_blocks"] = {"source": source_draft_blocks(source_dir), "carried": 0}
     if extra_record:
         record.update(extra_record)
     write_pruning_record(out, record)
@@ -341,6 +368,8 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "skipped_layers": report.skipped_layers,
         "ragged": report.ragged,
         "method": report.method,
+        "draft_blocks_source": source_draft_blocks(args.model),
+        "draft_blocks_carried": 0,
     }
     print("REAP_RESULT " + json.dumps(result), flush=True)
     return 0

@@ -263,6 +263,8 @@ def test_the_two_clis_emit_progress_lines_and_a_result(tmp_path, tiny_v4_dir, ca
         "skipped_layers": [],
         "ragged": False,
         "method": "reap",
+        "draft_blocks_source": 0,
+        "draft_blocks_carried": 0,
     }
     record = read_pruning_record(out_dir)
     assert record["calibration"]["samples"] == 12
@@ -279,3 +281,55 @@ def test_the_two_clis_emit_progress_lines_and_a_result(tmp_path, tiny_v4_dir, ca
     assert ragged.returncode == 0, ragged.stderr
     assert "ragged" in ragged.stderr
     assert json.loads(ragged.stdout.splitlines()[-1][12:])["skipped_layers"] == [0]
+
+
+def test_prune_256_to_64_hash_rows_unique(tmp_path):
+    """The reference's own width and routing (256 routed experts, top-6),
+    pruned to the 64-expert keep set vLLM's fused router serves."""
+    from transformers import AutoModelForCausalLM
+
+    model = build_tiny_v4(experts=256, top_k=6)
+    stats = _observe(model, samples=8, seq_len=24)
+    report = prune_model(model, stats, keep=64)
+    assert report.n_routed_experts_per_layer == [64, 64]
+    assert model.config.n_routed_experts == 64
+    for layer in moe_layers(model):
+        assert layer.num_experts == 64
+        table = getattr(layer.router, "tid2eid", None)
+        if table is not None:
+            assert int(table.max()) < 64
+            # A token never lists one kept expert twice after the remap.
+            assert all(len(set(row)) == len(row) for row in table.tolist())
+    out = save_pruned(model, tmp_path / "k64", report)
+    reloaded = AutoModelForCausalLM.from_pretrained(out, dtype=torch.float32).eval()
+    assert reloaded.config.n_routed_experts == 64
+    ids = torch.randint(4, VOCAB, (1, 10))
+    with torch.no_grad():
+        assert torch.isfinite(reloaded(input_ids=ids, use_cache=False).logits).all()
+
+
+def test_the_record_counts_the_draft_blocks_the_pruned_build_does_not_carry(tmp_path, tiny_v4_dir):
+    """transformers never builds the DSpark draft blocks, so a pruned
+    checkpoint carries none; the record says so (deacix/legwork#23177)."""
+    import shutil as _shutil
+
+    from reap.legwork.prune import source_draft_blocks
+
+    source = tmp_path / "with-drafts"
+    _shutil.copytree(tiny_v4_dir, source)
+    index = {
+        "metadata": {},
+        "weight_map": {
+            "model.embed_tokens.weight": "model.safetensors",
+            "mtp.0.ffn.experts.0.w1.weight": "model.safetensors",
+            "mtp.0.ffn.gate.weight": "model.safetensors",
+            "mtp.1.ffn.gate.weight": "model.safetensors",
+        },
+    }
+    (source / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+    assert source_draft_blocks(source) == 2
+    assert source_draft_blocks(tiny_v4_dir) == 0
+    model = build_tiny_v4()
+    report = prune_model(model, _observe(model), keep=KEEP)
+    out = save_pruned(model, tmp_path / "pruned", report, source_dir=source)
+    assert read_pruning_record(out)["draft_blocks"] == {"source": 2, "carried": 0}
