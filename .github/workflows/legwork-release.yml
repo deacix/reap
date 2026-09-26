@@ -1,0 +1,58 @@
+# The Legwork release of the `legwork` branch (deacix/reap). A pushed tag
+# `v<upstream>-legwork.<n>` naming pyproject.toml's version
+# (`<upstream>+legwork.<n>`) runs the CPU suite at the prune env's pins,
+# builds the sdist with the pinned hatchling (it rebuilds byte for byte)
+# and publishes it as the release asset the Legwork desktop worker pins by
+# sha256 (`apps/desktop/src/worker/engines/reap-pin.ts`, REAP_SOURCE).
+name: legwork release
+
+on:
+  push:
+    tags: ["v*-legwork.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The tag names the package's version
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          expected="v${version/+/-}"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name pyproject.toml's version $version (expected $expected)"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: The CPU suite (the prune env's pins)
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0
+          python -m pip install transformers==5.17.0 accelerate==1.15.0 safetensors==0.8.0 \
+            "huggingface_hub>=1.0" "numpy>=1.26" "pyyaml>=6.0" "tqdm>=4.60" pytest tokenizers jinja2
+          python -m pip install --no-deps -e .
+          python -m pytest tests/legwork -q
+      - name: The sdist
+        run: |
+          python -m pip install build hatchling==1.32.4
+          python -m build --sdist --no-isolation
+          (cd dist && sha256sum ./*.tar.gz | tee SHA256SUMS)
+          {
+            echo "### reap $VERSION"
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: The release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(cut -d' ' -f1 dist/SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+            --title "reap $VERSION" \
+            --notes "The Legwork fork's release of the \`legwork\` branch at ${GITHUB_SHA::7}. The sdist's sha256 is \`$digest\`; it rebuilds byte for byte at this commit (hatchling 1.32.4)."
