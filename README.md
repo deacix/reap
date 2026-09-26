@@ -3,8 +3,9 @@
 > **The Legwork fork (`deacix/reap`, branch `legwork`).** This branch adds a
 > slim, importable prune lane for transformers 5.x's fused mixture-of-experts
 > families, DeepSeek-V4 first: `MODEL_ATTRS["DeepseekV4ForCausalLM"]` (alias
-> `MODEL_ATTRS["deepseek_v4"]`), the `reap.legwork` package and two CLIs that
-> print `STAGE_PROGRESS <pct>` lines for the Legwork desktop worker. The core
+> `MODEL_ATTRS["deepseek_v4"]`), the `reap.legwork` package and its CLIs
+> (`reap-collect`, `reap-prune`, `reap-materialize`), which print
+> `STAGE_PROGRESS <pct>` lines for the Legwork desktop worker. The core
 > installs with torch, transformers, accelerate, safetensors and
 > huggingface_hub only; upstream's research stack is the `research` extra.
 > The Legwork worker installs a sha256-pinned release tarball of this branch
@@ -54,6 +55,29 @@
 > (null without `--kept`). `tests/legwork/fixtures/keep-plan-pooled.json`,
 > written by `tests/legwork/make_keep_plan_fixture.py`, pins the pooled-REAP
 > pick a keep-plan resolver must reproduce.
+>
+> Since `0.1.0+legwork.3` the lane also prunes Xiaomi's MiMo-V2
+> (`MODEL_ATTRS["MiMoV2ForCausalLM"]`, alias `mimo_v2`), whose Hub
+> checkpoints run only on their own model code and ship quantized: MXFP4
+> experts, FP8 blocks, and a fused `qkv_proj` cut in `metadata.tp_size`
+> chunks. The flow keeps the build in the source's formats:
+>
+> ```bash
+> # 1. the BF16 working copy the model code runs (split q/k/v, no drafts)
+> reap-materialize --source <hub-snapshot> --out <working-copy>
+> # 2. router stats through each MoE layer's router (the model's own code, at a pinned revision)
+> reap-collect --model <working-copy> --calib <set.jsonl> --out <router-stats.pt> --trust-remote-code --device auto
+> # 3. slice the Hub snapshot's own tensors: kept experts renumbered, router rows sliced,
+> #    everything else byte for byte; --drop-drafts leaves out model.mtp.* and dflash/
+> reap-prune --model <hub-snapshot> --stats <router-stats.pt> --out <pruned> --keep 192 --slice-source
+> ```
+>
+> `reap.legwork.compat` adapts the model code's mask calls (written for
+> transformers 5.3) to the installed transformers. The CPU suite adds a tiny
+> random MiMo-V2 in the V2.6 layout, built from Xiaomi's vendored model code
+> (`tests/legwork/fixtures/mimo_v2`): the working copy matches the formats'
+> round trip bit for bit, and a sliced build serves exactly as the source
+> does with the dropped experts masked out of its router.
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).

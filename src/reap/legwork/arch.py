@@ -3,10 +3,17 @@
 """Resolve a model's MoE layout from ``MODEL_ATTRS``.
 
 The lane reads the same table the research entry points read
-(``reap.model_util.MODEL_ATTRS``) and requires the fused-experts shape
-transformers 5.x gives its ``@use_experts_implementation`` families: the
-experts module holds ``gate_up_proj`` / ``down_proj`` as 3-D parameters
-indexed by expert and applies the family's gate through ``_apply_gate``.
+(``reap.model_util.MODEL_ATTRS``) and takes two shapes:
+
+- the fused experts transformers 5.x gives its ``@use_experts_implementation``
+  families (DeepSeek-V4): the experts module holds ``gate_up_proj`` /
+  ``down_proj`` as 3-D parameters indexed by expert and applies the
+  family's gate through ``_apply_gate``;
+- the loop-based experts of an entry marked ``legwork_loop`` (MiMo-V2, the
+  checkpoint's own model code): ``experts`` is a ``ModuleList`` of MLPs and
+  the router returns ``(topk_idx, topk_weight)``. The lane observes these
+  through the router and prunes them by slicing the source checkpoint
+  (``reap.legwork.slice``), never in memory.
 """
 
 from __future__ import annotations
@@ -32,9 +39,13 @@ class MoeLayer:
     #: ``"moe"`` for a learned top-k router, ``"hash_moe"`` for a frozen
     #: token-id table (``tid2eid``) — DeepSeek-V4's bootstrap layers.
     kind: str
+    #: Fused 3-D expert parameters; ``False`` for a ``ModuleList`` of experts.
+    fused: bool = True
 
     @property
     def num_experts(self) -> int:
+        if isinstance(self.experts, nn.ModuleList):
+            return len(self.experts)
         return int(self.experts.num_experts)
 
 
@@ -51,25 +62,30 @@ def model_attrs(model: nn.Module) -> dict:
         raise ValueError(
             f"{class_name} is not a REAP-supported architecture; supported: {supported}"
         )
-    if not entry.get("fused"):
+    if not entry.get("fused") and not entry.get("legwork_loop"):
         raise ValueError(
             f"{class_name} uses loop-based experts; the Legwork lane prunes the fused "
-            "families only (DeepseekV4ForCausalLM) — use the research entry points."
+            "families and MiMoV2ForCausalLM only — use the research entry points."
         )
     return entry
 
 
 def _decoder_layers(model: nn.Module) -> nn.ModuleList:
-    base = getattr(model, model.base_model_prefix, model)
-    layers = getattr(base, "layers", None)
-    if layers is None:
-        raise ValueError(f"{model.__class__.__name__} exposes no decoder layers")
-    return layers
+    """The decoder stack: under ``base_model_prefix``, or ``model.model`` for
+    remote code that declares no prefix (MiMo-V2's)."""
+    prefix = getattr(model, "base_model_prefix", "") or ""
+    for base in (getattr(model, prefix, None) if prefix else None, getattr(model, "model", None), model):
+        layers = getattr(base, "layers", None) if base is not None else None
+        if isinstance(layers, nn.ModuleList):
+            return layers
+    raise ValueError(f"{model.__class__.__name__} exposes no decoder layers")
 
 
 def moe_layers(model: nn.Module) -> list[MoeLayer]:
-    """Every decoder layer holding a fused MoE block, in layer order."""
+    """Every decoder layer holding an MoE block of the entry's shape, in
+    layer order (a dense layer's MLP has no router and is skipped)."""
     attrs = model_attrs(model)
+    loop = bool(attrs.get("legwork_loop"))
     layer_types_attr = attrs.get("layer_types")
     layer_types = (
         list(getattr(model.config, layer_types_attr)) if layer_types_attr else None
@@ -82,16 +98,25 @@ def moe_layers(model: nn.Module) -> list[MoeLayer]:
             continue
         experts = getattr(block, attrs["experts"], None)
         router = getattr(block, attrs["router"], None)
-        if experts is None or router is None or not hasattr(experts, "gate_up_proj"):
+        if experts is None or router is None:
+            continue
+        if loop:
+            if not isinstance(experts, nn.ModuleList):
+                continue
+        elif not hasattr(experts, "gate_up_proj"):
             continue
         kind = TOPK_KIND
         if layer_types is not None and index < len(layer_types) and layer_types[index] == hash_kind:
             kind = HASH_KIND
         elif attrs.get("hash_table") and hasattr(router, attrs["hash_table"]):
             kind = HASH_KIND
-        found.append(MoeLayer(index=index, block=block, experts=experts, router=router, kind=kind))
+        found.append(
+            MoeLayer(
+                index=index, block=block, experts=experts, router=router, kind=kind, fused=not loop
+            )
+        )
     if not found:
-        raise ValueError(f"{model.__class__.__name__} has no fused MoE layers to prune")
+        raise ValueError(f"{model.__class__.__name__} has no MoE layers to prune")
     return found
 
 

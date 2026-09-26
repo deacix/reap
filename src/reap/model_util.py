@@ -1,5 +1,6 @@
 # Modified by the Legwork fork (deacix/reap, the `legwork` branch, 2026):
-# the DeepseekV4ForCausalLM entry of MODEL_ATTRS and its `deepseek_v4` alias.
+# the DeepseekV4ForCausalLM and MiMoV2ForCausalLM entries of MODEL_ATTRS and
+# their `deepseek_v4` / `mimo_v2` aliases.
 import torch
 import logging
 
@@ -142,11 +143,35 @@ MODEL_ATTRS = {
         "layer_types": "mlp_layer_types",
         "hash_layer_type": "hash_moe",
     },
+    # Xiaomi MiMo-V2 (Legwork fork, `legwork` branch; the checkpoint's own
+    # `modeling_mimo_v2.py`, loaded through trust_remote_code). Loop-based
+    # experts under `layer.mlp`: `experts` is a ModuleList of MLPs with
+    # `gate_proj` / `up_proj` / `down_proj`, and the router at `mlp.gate`
+    # returns `(topk_idx, topk_weight)` and carries `e_score_correction_bias`
+    # (a sigmoid `noaux_tc` router). Layer 0 is dense (`moe_layer_freq`). The
+    # Legwork lane observes it through the router (`legwork_loop`) and prunes
+    # it by slicing the source checkpoint's own tensors (`reap-prune
+    # --slice-source`), never through the loop-based `prune()` above.
+    "MiMoV2ForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "legwork_loop": True,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+        "model_type": "mimo_v2",
+        "moe_layer_freq": "moe_layer_freq",
+    },
 }
 
-# The same entry under its `config.model_type`, so a caller holding a config
-# and not a model class name resolves it too (`MODEL_ATTRS["deepseek_v4"]`).
+# The same entries under their `config.model_type`, so a caller holding a
+# config and not a model class name resolves them too.
 MODEL_ATTRS["deepseek_v4"] = MODEL_ATTRS["DeepseekV4ForCausalLM"]
+MODEL_ATTRS["mimo_v2"] = MODEL_ATTRS["MiMoV2ForCausalLM"]
 
 
 def get_moe(model, layer):

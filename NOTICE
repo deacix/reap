@@ -6,21 +6,38 @@ This distribution is the Legwork fork of REAP
 (https://github.com/deacix/reap, branch `legwork`) and carries
 modifications Copyright 2026 the Legwork authors, under the same licence:
 
-  - src/reap/model_util.py    the DeepseekV4ForCausalLM entry of MODEL_ATTRS
-                              (and its `deepseek_v4` alias)
+  - src/reap/model_util.py    the DeepseekV4ForCausalLM and MiMoV2ForCausalLM
+                              entries of MODEL_ATTRS (and their
+                              `deepseek_v4` / `mimo_v2` aliases)
   - src/reap/legwork/         the slim prune lane: the router-stats observer
                               (per-source terms, the token sketch, the
-                              exemplars), the expert map, the pruner (--keep,
-                              --skip-layers, --kept, the hash-table remap),
-                              the ragged-checkpoint loader, the
-                              `reap-collect` / `reap-prune` CLIs (chat
-                              templates with tools, template fallbacks) and
-                              their STAGE_PROGRESS contract
+                              exemplars; fused experts and MiMo-V2's router),
+                              the expert map, the pruner (--keep,
+                              --skip-layers, --kept, the hash-table remap,
+                              --slice-source), the ragged-checkpoint loader,
+                              MiMo-V2's storage formats (MXFP4, FP8 blocks,
+                              the TP-chunked fused qkv_proj), the BF16 working
+                              copy, the source slicer, the transformers
+                              shim for a checkpoint's own model code, the
+                              `reap-collect` / `reap-prune` /
+                              `reap-materialize` CLIs (chat templates with
+                              tools, template fallbacks) and their
+                              STAGE_PROGRESS contract
   - tests/legwork/, tests/conftest.py
-                              the CPU suite on a tiny random DeepSeek-V4, the
-                              pooled-REAP keep-plan fixture and its seeded
+                              the CPU suite on a tiny random DeepSeek-V4 and a
+                              tiny random MiMo-V2 in the V2.6 storage layout,
+                              the pooled-REAP keep-plan fixture and its seeded
                               generator; the research suites collected only
                               with their stack
+  - tests/legwork/fixtures/mimo_v2/
+                              Xiaomi's MiMo-V2 model code and chat template,
+                              copied verbatim from XiaomiMiMo/MiMo-V2.6-Flash-RL
+                              at 5711b268169967567844e1e560e8a3966da959b1
+                              (the Python files under their own Apache-2.0
+                              headers, Copyright 2026 Xiaomi Corporation and
+                              The HuggingFace Inc. team; the template under the
+                              repository's MIT licence; PROVENANCE.md lists
+                              their digests)
   - pyproject.toml            the slim dependency core (the research stack as
                               the `research` extra), the sdist contents, the
                               console scripts, this fork's version line

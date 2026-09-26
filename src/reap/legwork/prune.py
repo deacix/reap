@@ -28,12 +28,21 @@ unique expert ids in ``[0, experts)``; ``keep`` must equal ``--keep``. A
 draft-block scope (``D<n>``) refuses, since the pruned checkpoint carries
 no draft blocks, and so does ``--skip-layers`` beside ``--kept``.
 
+``--slice-source`` (MiMo-V2) never loads a model. The kept ids come from
+``--model``'s ``config.json`` (its ``moe_layer_freq`` layers, each
+``n_routed_experts`` wide) and the router stats a working copy's collect
+wrote, or ``--kept``; ``reap.legwork.slice`` then writes the build from
+``--model``'s own tensors at their stored precision. ``--drop-drafts``
+leaves out the multi-token-prediction layers and the DFlash drafter.
+
 CLI::
 
     python -m reap.legwork.prune --model <dir> --stats <router-stats.pt> \
         --out <dir> --keep 192 [--skip-layers 0,1,2] [--method reap]
     python -m reap.legwork.prune --model <dir> --kept <kept.json> \
         --out <dir> --keep 192 [--stats <router-stats.pt>]
+    python -m reap.legwork.prune --model <hub-dir> --stats <router-stats.pt> \
+        --out <dir> --keep 192 --slice-source [--drop-drafts]
 
 Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``:
 ``out``, ``keep``, ``experts_before``, ``layers``, ``skipped_layers``,
@@ -61,6 +70,7 @@ import torch.nn.functional as F
 from reap.legwork.arch import HASH_KIND, MoeLayer, model_attrs, moe_layers, num_routed_experts
 from reap.legwork.observer import load_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
+from reap.legwork.slice import slice_source, source_draft_layers, source_moe_layers
 
 METHODS = ("reap", "frequency", "weighted_frequency")
 #: The method a pruning record names when a kept plan chose the experts.
@@ -379,6 +389,51 @@ def prune_model(
     return report
 
 
+def kept_from_source(
+    config: dict[str, Any],
+    stats: dict[str, Any] | None,
+    keep: int,
+    method: str = "reap",
+    kept_plan: dict[str, Any] | None = None,
+) -> tuple[PruneReport, dict[int, list[int]]]:
+    """``prune_model``'s choice for ``--slice-source``, read from the source's
+    ``config.json`` instead of a loaded model: every MoE layer's kept ids,
+    ascending, and the report the pruned build records."""
+    layers = source_moe_layers(config)
+    experts_before = layers[0].num_experts
+    top_k = int(config["num_experts_per_tok"])
+    if not 1 <= keep <= experts_before:
+        raise ValueError(f"--keep must be between 1 and {experts_before}, got {keep}")
+    if keep < top_k:
+        raise ValueError(f"--keep {keep} is below the router's top-k {top_k}")
+    if kept_plan is not None:
+        plan = resolve_kept_plan(kept_plan, layers, keep)
+        method = KEPT_METHOD
+    elif stats is None:
+        raise ValueError("pruning ranks the experts from router stats; pass stats or a kept plan")
+    elif method not in METHODS:
+        raise ValueError(f"unknown prune method {method!r}; one of {METHODS}")
+    layer_stats = (stats or {}).get("layers", {})
+    report = PruneReport(method=method, keep=keep, experts_before=experts_before)
+    kept: dict[int, list[int]] = {}
+    for layer in layers:
+        if kept_plan is not None:
+            chosen = plan[layer.index]
+        else:
+            this = layer_stats.get(layer.index)
+            if this is None:
+                raise ValueError(f"the router stats carry no layer {layer.index}; re-run collect")
+            if int(this["num_experts"]) != layer.num_experts:
+                raise ValueError(
+                    f"layer {layer.index}: the stats were recorded over {this['num_experts']} experts, "
+                    f"the source has {layer.num_experts}"
+                )
+            chosen = select_kept(saliency(this, method), keep)
+        kept[layer.index] = chosen.tolist()
+        report.layers.append(PrunedLayer(layer.index, layer.kind, experts_before, kept[layer.index]))
+    return report, kept
+
+
 DRAFT_BLOCK = re.compile(r"^mtp\.(\d+)\.")
 
 
@@ -477,11 +532,102 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dtype", default="auto", choices=("auto", "float32", "bfloat16", "float16"))
     parser.add_argument("--device", default="cpu", help="cpu, cuda, cuda:N or auto (accelerate device_map)")
+    parser.add_argument(
+        "--slice-source",
+        action="store_true",
+        help="write the pruned build by slicing --model's own tensors at their stored precision "
+        "(a MiMo-V2 Hub checkpoint) instead of loading the model",
+    )
+    parser.add_argument(
+        "--drop-drafts",
+        action="store_true",
+        help="with --slice-source: leave out the multi-token-prediction layers and the DFlash drafter",
+    )
     return parser
+
+
+def _main_slice(args: argparse.Namespace, progress: Callable[[float], None]) -> int:
+    """``--slice-source``: choose from the source's config, slice its files."""
+    kept_plan: dict[str, Any] | None = None
+    kept_plan_sha256: str | None = None
+    if parse_layer_list(args.skip_layers):
+        raise SystemExit("reap-prune: --slice-source writes a uniform build; it takes no --skip-layers")
+    if args.kept is not None:
+        if args.method is not None:
+            raise SystemExit("reap-prune: --kept names the experts and --method ranks them; pass one")
+        try:
+            kept_plan, kept_plan_sha256 = read_kept_plan(args.kept, args.keep)
+        except OSError as error:
+            raise SystemExit(
+                f"reap-prune: --kept {args.kept} cannot be read ({error.strerror or type(error).__name__})"
+            ) from error
+        except ValueError as error:
+            raise SystemExit(f"reap-prune: --kept {args.kept}: {error}") from error
+    elif args.stats is None:
+        raise SystemExit("reap-prune: --stats is required unless --kept names the experts")
+    progress(0)
+    config = json.loads((pathlib.Path(args.model) / "config.json").read_text(encoding="utf-8"))
+    stats = load_router_stats(args.stats) if args.stats is not None else None
+    try:
+        report, kept = kept_from_source(
+            config, stats, args.keep, method=args.method or "reap", kept_plan=kept_plan
+        )
+        progress(5)
+        sliced = slice_source(
+            args.model,
+            args.out,
+            kept,
+            drop_drafts=args.drop_drafts,
+            progress=lambda pct: progress(5 + pct * 0.9),
+        )
+    except ValueError as error:
+        raise SystemExit(f"reap-prune: {error}") from error
+    draft_layers = source_draft_layers(args.model)
+    carried = 0 if args.drop_drafts else draft_layers
+    record = report.to_record()
+    record.update(
+        {
+            "draft_blocks": {"source": draft_layers, "carried": carried},
+            "source": str(args.model),
+            "stats": None if args.stats is None else str(args.stats),
+            "calibration": None if stats is None else stats.get("calibration"),
+            "kept_plan": None
+            if kept_plan is None
+            else {"sha256": kept_plan_sha256, "path": str(args.kept)},
+            "sliced": {
+                "copied": sliced.copied,
+                "sliced": sliced.sliced,
+                "dropped": sliced.dropped,
+                "total_size": sliced.total_size,
+            },
+        }
+    )
+    write_pruning_record(args.out, record)
+    progress(100)
+    result = {
+        "out": str(args.out),
+        "keep": report.keep,
+        "experts_before": report.experts_before,
+        "layers": len(report.layers),
+        "skipped_layers": [],
+        "ragged": False,
+        "method": report.method,
+        "draft_blocks_source": draft_layers,
+        "draft_blocks_carried": carried,
+        "kept_plan_sha256": kept_plan_sha256,
+        "sliced": True,
+        "total_size": sliced.total_size,
+    }
+    print("REAP_RESULT " + json.dumps(result), flush=True)
+    return 0
 
 
 def main(argv: list[str] | None = None, progress: Callable[[float], None] = stage_progress) -> int:
     args = build_parser().parse_args(argv)
+    if args.slice_source:
+        return _main_slice(args, progress)
+    if args.drop_drafts:
+        raise SystemExit("reap-prune: --drop-drafts slices the drafts away; pass it with --slice-source")
     skip = parse_layer_list(args.skip_layers)
     kept_plan: dict[str, Any] | None = None
     kept_plan_sha256: str | None = None

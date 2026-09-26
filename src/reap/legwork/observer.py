@@ -12,7 +12,10 @@ routing the model actually applied — ``(hidden_states, top_k_index,
 top_k_weights)`` — and recomputes each expert on its routed tokens only.
 A hash-routed layer (DeepSeek-V4's ``tid2eid`` bootstrap layers) needs
 nothing special: its table picks the indices, its gate the weights, and
-the hook sees both.
+the hook sees both. A loop-based family (MiMo-V2, a ``ModuleList`` of
+experts) is hooked at its router instead: the router's input is the
+hidden states, its ``(topk_idx, topk_weight)`` output the routing, and
+each expert module is recomputed on its routed tokens the same way.
 
 Stats version 2 adds, per layer, the saliency inputs split by calibration
 source (``by_source``), a bounded sketch of the token ids each expert
@@ -58,11 +61,13 @@ def routed_expert_norms(
     top_k_weights: torch.Tensor,
 ) -> Iterable[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Yield ``(expert, token_idx, weights, output_norms)`` for every expert
-    with a routed token, mirroring the fused module's eager loop: the
-    expert's gate-up projection through the family's gate, the down
-    projection, the L2 norm per routed token, in float32. ``token_idx``
-    are the routed tokens' rows in the flattened batch."""
-    num_experts = int(experts.num_experts)
+    with a routed token, mirroring the model's own expert computation: for
+    fused experts the gate-up projection through the family's gate and the
+    down projection; for a ``ModuleList`` the expert module itself. The L2
+    norm per routed token is in float32; ``token_idx`` are the routed
+    tokens' rows in the flattened batch."""
+    loop = isinstance(experts, nn.ModuleList)
+    num_experts = len(experts) if loop else int(experts.num_experts)
     flat = hidden_states.reshape(-1, hidden_states.shape[-1])
     index = top_k_index.reshape(flat.shape[0], -1)
     weights = top_k_weights.reshape(flat.shape[0], -1)
@@ -72,14 +77,17 @@ def routed_expert_norms(
             continue
         token_idx, slot = torch.where(hit)
         x = flat[token_idx]
-        gate_up = F.linear(x, experts.gate_up_proj[expert])
-        apply_gate = getattr(experts, "_apply_gate", None)
-        if apply_gate is None:
-            gate, up = gate_up.chunk(2, dim=-1)
-            act = F.silu(gate) * up
+        if loop:
+            out = experts[expert](x)
         else:
-            act = apply_gate(gate_up)
-        out = F.linear(act, experts.down_proj[expert])
+            gate_up = F.linear(x, experts.gate_up_proj[expert])
+            apply_gate = getattr(experts, "_apply_gate", None)
+            if apply_gate is None:
+                gate, up = gate_up.chunk(2, dim=-1)
+                act = F.silu(gate) * up
+            else:
+                act = apply_gate(gate_up)
+            out = F.linear(act, experts.down_proj[expert])
         yield expert, token_idx, weights[token_idx, slot].float(), out.float().norm(dim=-1)
 
 
@@ -330,7 +338,10 @@ class RouterStatsObserver:
         self._source_ids: list[str] = []
         self._sample: _Sample | None = None
         self._hooks = [
-            layer.experts.register_forward_hook(self._hook(layer)) for layer in self.layers
+            layer.experts.register_forward_hook(self._hook(layer))
+            if layer.fused
+            else layer.router.register_forward_hook(self._router_hook(layer))
+            for layer in self.layers
         ]
         self.samples = 0
 
@@ -352,6 +363,8 @@ class RouterStatsObserver:
         return state
 
     def _hook(self, layer: MoeLayer):
+        """A fused experts module's hook: the routing arrives as its arguments."""
+
         @torch.no_grad()
         def hook(module: nn.Module, args: tuple, output: Any) -> None:
             if len(args) < 3:
@@ -359,96 +372,122 @@ class RouterStatsObserver:
                     f"layer {layer.index}: the experts module was called with {len(args)} "
                     "positional arguments; the lane expects (hidden_states, top_k_index, top_k_weights)"
                 )
-            hidden_states, top_k_index, top_k_weights = args[0], args[1], args[2]
-            tokens = int(hidden_states.reshape(-1, hidden_states.shape[-1]).shape[0])
-            sample = self._sample
-            if sample is not None:
-                if int(sample.ids.numel()) != tokens:
-                    raise ValueError(
-                        f"layer {layer.index}: the forward pass routed {tokens} tokens, "
-                        f"begin_sample named {int(sample.ids.numel())}"
-                    )
-                if layer.index in sample.layers:
-                    raise ValueError(
-                        f"layer {layer.index}: a second forward pass for one sample; "
-                        "call begin_sample before each forward"
-                    )
-                sample.layers.add(layer.index)
-            state = self._layer_state(layer, hidden_states.device)
-            state["tokens"] += tokens
-            track = sample is not None and not sample.private
-            hit: list[int] = []
-            counts: list[int] = []
-            weight_sums, reap_sums, norm_parts, row_parts, contribution_parts = [], [], [], [], []
-            for expert, token_idx, weights, norms in routed_expert_norms(
-                module, hidden_states, top_k_index, top_k_weights
-            ):
-                # float32 x float32 is exact in float64; the sums stay per
-                # expert so a GPU run adds in a fixed order.
-                contribution = weights.double() * norms.double()
-                hit.append(expert)
-                counts.append(int(norms.numel()))
-                weight_sums.append(weights.double().sum())
-                reap_sums.append(contribution.sum())
-                norm_parts.append(norms)
-                if track:
-                    row_parts.append(token_idx)
-                    contribution_parts.append(contribution)
-            if not hit:
-                return
-            device = state["count"].device
-            n = layer.num_experts
-            experts = torch.tensor(hit, dtype=torch.long, device=device)
-            slot_expert = torch.repeat_interleave(
-                experts, torch.tensor(counts, dtype=torch.long, device=device)
-            )
-            count = torch.zeros_like(state["count"])
-            count[experts] = torch.tensor(counts, dtype=torch.long, device=device)
-            reap = torch.zeros_like(state["reap_sum"])
-            reap[experts] = torch.stack(reap_sums).to(device)
-            state["count"] += count
-            state["reap_sum"] += reap
-            state["weight_sum"][experts] += torch.stack(weight_sums).to(device)
-            max_norm = torch.zeros_like(state["max_norm"]).scatter_reduce_(
-                0, slot_expert, torch.cat(norm_parts).to(device), "amax", include_self=False
-            )
-            state["max_norm"] = torch.maximum(state["max_norm"], max_norm)
-            if sample is None:
-                return
-            per_source = state["by_source"].get(sample.source)
-            if per_source is None:
-                per_source = {"count": torch.zeros_like(count), "reap_sum": torch.zeros_like(reap)}
-                state["by_source"][sample.source] = per_source
-            per_source["count"] += count
-            per_source["reap_sum"] += reap
-            if not track:
-                return
-            ids = sample.ids_on(device)
-            sketch = self._sketches.get(layer.index)
-            if sketch is None:
-                sketch = self._sketches[layer.index] = TopTokenSketch(layer.num_experts, self.vocab_size)
-            sketch.add(top_k_index.to(device), ids)
-            # Per expert, the routed token with the highest contribution (the
-            # first such row on a tie); max and min are exact in any order.
-            contribution = torch.cat(contribution_parts).to(device)
-            rows = torch.cat(row_parts).to(device)
-            best = torch.full((n,), -math.inf, dtype=torch.float64, device=device)
-            best.scatter_reduce_(0, slot_expert, contribution, "amax", include_self=False)
-            at_best = contribution == best[slot_expert]
-            position = torch.full((n,), tokens, dtype=torch.long, device=device)
-            position.scatter_reduce_(0, slot_expert[at_best], rows[at_best], "amin")
-            table = self._exemplars.get(layer.index)
-            if table is None:
-                table = self._exemplars[layer.index] = ExemplarTable(n, device)
-            table.offer(
-                best,
-                torch.where(count > 0, position, torch.full_like(position, -1)),
-                ids,
-                sample=sample.serial,
-                source=self._source_ids.index(sample.source),
-            )
+            self._observe(layer, module, args[0], args[1], args[2])
 
         return hook
+
+    def _router_hook(self, layer: MoeLayer):
+        """A loop-based layer's hook on its router (MiMo-V2's ``mlp.gate``):
+        the hidden states are its input, the routing its ``(topk_idx,
+        topk_weight)`` output, and each expert is recomputed on its tokens."""
+
+        @torch.no_grad()
+        def hook(module: nn.Module, args: tuple, output: Any) -> None:
+            if not args or not isinstance(output, tuple) or len(output) < 2:
+                raise ValueError(
+                    f"layer {layer.index}: the router's call carried no hidden states or "
+                    "returned no (topk_idx, topk_weight)"
+                )
+            self._observe(layer, layer.experts, args[0], output[0], output[1])
+
+        return hook
+
+    def _observe(
+        self,
+        layer: MoeLayer,
+        experts: nn.Module,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> None:
+        """Accumulate one forward pass's routing of ``layer``."""
+        tokens = int(hidden_states.reshape(-1, hidden_states.shape[-1]).shape[0])
+        sample = self._sample
+        if sample is not None:
+            if int(sample.ids.numel()) != tokens:
+                raise ValueError(
+                    f"layer {layer.index}: the forward pass routed {tokens} tokens, "
+                    f"begin_sample named {int(sample.ids.numel())}"
+                )
+            if layer.index in sample.layers:
+                raise ValueError(
+                    f"layer {layer.index}: a second forward pass for one sample; "
+                    "call begin_sample before each forward"
+                )
+            sample.layers.add(layer.index)
+        state = self._layer_state(layer, hidden_states.device)
+        state["tokens"] += tokens
+        track = sample is not None and not sample.private
+        hit: list[int] = []
+        counts: list[int] = []
+        weight_sums, reap_sums, norm_parts, row_parts, contribution_parts = [], [], [], [], []
+        for expert, token_idx, weights, norms in routed_expert_norms(
+            experts, hidden_states, top_k_index, top_k_weights
+        ):
+            # float32 x float32 is exact in float64; the sums stay per
+            # expert so a GPU run adds in a fixed order.
+            contribution = weights.double() * norms.double()
+            hit.append(expert)
+            counts.append(int(norms.numel()))
+            weight_sums.append(weights.double().sum())
+            reap_sums.append(contribution.sum())
+            norm_parts.append(norms)
+            if track:
+                row_parts.append(token_idx)
+                contribution_parts.append(contribution)
+        if not hit:
+            return
+        device = state["count"].device
+        n = layer.num_experts
+        experts = torch.tensor(hit, dtype=torch.long, device=device)
+        slot_expert = torch.repeat_interleave(
+            experts, torch.tensor(counts, dtype=torch.long, device=device)
+        )
+        count = torch.zeros_like(state["count"])
+        count[experts] = torch.tensor(counts, dtype=torch.long, device=device)
+        reap = torch.zeros_like(state["reap_sum"])
+        reap[experts] = torch.stack(reap_sums).to(device)
+        state["count"] += count
+        state["reap_sum"] += reap
+        state["weight_sum"][experts] += torch.stack(weight_sums).to(device)
+        max_norm = torch.zeros_like(state["max_norm"]).scatter_reduce_(
+            0, slot_expert, torch.cat(norm_parts).to(device), "amax", include_self=False
+        )
+        state["max_norm"] = torch.maximum(state["max_norm"], max_norm)
+        if sample is None:
+            return
+        per_source = state["by_source"].get(sample.source)
+        if per_source is None:
+            per_source = {"count": torch.zeros_like(count), "reap_sum": torch.zeros_like(reap)}
+            state["by_source"][sample.source] = per_source
+        per_source["count"] += count
+        per_source["reap_sum"] += reap
+        if not track:
+            return
+        ids = sample.ids_on(device)
+        sketch = self._sketches.get(layer.index)
+        if sketch is None:
+            sketch = self._sketches[layer.index] = TopTokenSketch(layer.num_experts, self.vocab_size)
+        sketch.add(top_k_index.to(device), ids)
+        # Per expert, the routed token with the highest contribution (the
+        # first such row on a tie); max and min are exact in any order.
+        contribution = torch.cat(contribution_parts).to(device)
+        rows = torch.cat(row_parts).to(device)
+        best = torch.full((n,), -math.inf, dtype=torch.float64, device=device)
+        best.scatter_reduce_(0, slot_expert, contribution, "amax", include_self=False)
+        at_best = contribution == best[slot_expert]
+        position = torch.full((n,), tokens, dtype=torch.long, device=device)
+        position.scatter_reduce_(0, slot_expert[at_best], rows[at_best], "amin")
+        table = self._exemplars.get(layer.index)
+        if table is None:
+            table = self._exemplars[layer.index] = ExemplarTable(n, device)
+        table.offer(
+            best,
+            torch.where(count > 0, position, torch.full_like(position, -1)),
+            ids,
+            sample=sample.serial,
+            source=self._source_ids.index(sample.source),
+        )
 
     def begin_sample(
         self,

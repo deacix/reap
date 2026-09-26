@@ -7,7 +7,13 @@ CLI::
     python -m reap.legwork.collect --model <dir> --calib <set.jsonl> \
         --out <router-stats.pt> [--map <expert-map.json.gz>] [--seq-len 2048] \
         [--max-samples N] [--layers 3,4,5] [--device cpu|cuda|auto] \
-        [--dtype auto|bfloat16|float32]
+        [--dtype auto|bfloat16|float32] [--trust-remote-code]
+
+``--trust-remote-code`` loads the checkpoint's own model code: a MiMo-V2
+working copy (``reap-materialize``), whose ``modeling_mimo_v2.py`` rides the
+snapshot. The caller passes it only for a snapshot at a pinned revision;
+``reap.legwork.compat`` adapts that code's mask calls to the installed
+transformers.
 
 The calibration set is JSON Lines; each row is one sample in one of four
 shapes: ``{"text": "..."}``, ``{"messages": [{"role", "content"}, ...]}``
@@ -59,6 +65,7 @@ from typing import Any, Callable, Iterator
 
 import torch
 
+from reap.legwork.compat import patch_remote_code
 from reap.legwork.expert_map import build_expert_map, write_expert_map
 from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
@@ -231,7 +238,7 @@ class SampleEncoder:
         return list(encoded["input_ids"])
 
 
-def _load_model(path: str, dtype: str, device: str):
+def _load_model(path: str, dtype: str, device: str, trust_remote_code: bool = False):
     from transformers import AutoModelForCausalLM
 
     kwargs: dict[str, Any] = {"dtype": "auto" if dtype == "auto" else getattr(torch, dtype)}
@@ -239,7 +246,12 @@ def _load_model(path: str, dtype: str, device: str):
         kwargs["device_map"] = "auto"
     elif device != "cpu":
         kwargs["device_map"] = device
-    return AutoModelForCausalLM.from_pretrained(path, **kwargs).eval()
+    if trust_remote_code:
+        kwargs["trust_remote_code"] = True
+    model = AutoModelForCausalLM.from_pretrained(path, **kwargs).eval()
+    if trust_remote_code:
+        patch_remote_code(model)
+    return model
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -255,6 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--layers", default="", help="comma-separated layer indices to observe (default: every MoE layer)")
     parser.add_argument("--dtype", default="auto", choices=("auto", "float32", "bfloat16", "float16"))
     parser.add_argument("--device", default="cpu", help="cpu, cuda, cuda:N or auto (accelerate device_map)")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="load the checkpoint's own model code (MiMo-V2's working copy); the caller "
+        "passes it only for a snapshot at a pinned revision",
+    )
     return parser
 
 
@@ -280,7 +298,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
                 f"reap-collect: --map decodes token ids with the model's tokenizer, and "
                 f"{args.model} holds none that loads ({type(error).__name__})"
             ) from error
-    model = _load_model(args.model, args.dtype, args.device)
+    model = _load_model(args.model, args.dtype, args.device, args.trust_remote_code)
     device = next(model.parameters()).device
     observer = RouterStatsObserver(model, layers or None)
     progress(5)
