@@ -335,3 +335,75 @@ def test_the_record_counts_the_draft_blocks_the_pruned_build_does_not_carry(tmp_
     report = prune_model(model, _observe(model), keep=KEEP)
     out = save_pruned(model, tmp_path / "pruned", report, source_dir=source)
     assert read_pruning_record(out)["draft_blocks"] == {"source": 2, "carried": 0}
+
+
+def _checkpoint_dir(root, name, quantization=None):
+    path = root / name
+    path.mkdir()
+    config = {"model_type": "deepseek_v4"}
+    if quantization is not None:
+        config["quantization_config"] = quantization
+    (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def test_dequantize_kwargs_flip_only_an_fp8_checkpoint(tmp_path):
+    """--dequantize loads an FP8 checkpoint in BF16 and leaves any other
+    checkpoint alone (deacix/legwork#24439: AMD ROCm boards)."""
+    from reap.legwork.load import dequantize_kwargs, is_fp8_checkpoint
+
+    fp8 = _checkpoint_dir(
+        tmp_path, "fp8", {"quant_method": "fp8", "fmt": "e4m3", "weight_block_size": [128, 128]}
+    )
+    plain = _checkpoint_dir(tmp_path, "plain")
+    other = _checkpoint_dir(tmp_path, "awq", {"quant_method": "awq"})
+    assert is_fp8_checkpoint(fp8)
+    assert not is_fp8_checkpoint(plain) and not is_fp8_checkpoint(other)
+    assert not is_fp8_checkpoint(tmp_path / "missing")
+    kwargs = dequantize_kwargs(fp8)
+    assert kwargs["quantization_config"].dequantize is True
+    assert kwargs["dtype"] is torch.bfloat16
+    assert "dtype" not in dequantize_kwargs(fp8, "float32")
+    assert dequantize_kwargs(plain) == {}
+    assert dequantize_kwargs(other) == {}
+
+
+@pytest.mark.parametrize("stage", ["collect", "prune"])
+def test_dequantize_reaches_from_pretrained(tmp_path, monkeypatch, stage):
+    """Both stages pass the loading config only with --dequantize, and only
+    for an FP8 checkpoint; the flag parses on both CLIs."""
+    import importlib
+
+    import transformers
+
+    module = importlib.import_module(f"reap.legwork.{stage}")
+    seen: list[dict] = []
+
+    class _Loaded:
+        def eval(self):
+            return self
+
+    def fake_from_pretrained(path, **kwargs):
+        seen.append(kwargs)
+        return _Loaded()
+
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM, "from_pretrained", staticmethod(fake_from_pretrained)
+    )
+    fp8 = _checkpoint_dir(tmp_path, "fp8", {"quant_method": "fp8", "weight_block_size": [128, 128]})
+    plain = _checkpoint_dir(tmp_path, "plain")
+
+    module._load_model(str(fp8), "auto", "cpu")
+    module._load_model(str(fp8), "auto", "cpu", dequantize=True)
+    module._load_model(str(plain), "auto", "cpu", dequantize=True)
+    assert "quantization_config" not in seen[0] and seen[0]["dtype"] == "auto"
+    assert seen[1]["quantization_config"].dequantize is True
+    assert seen[1]["dtype"] is torch.bfloat16
+    assert "quantization_config" not in seen[2] and seen[2]["dtype"] == "auto"
+
+    argv = {
+        "collect": ["--model", "m", "--calib", "c.jsonl", "--out", "o.pt"],
+        "prune": ["--model", "m", "--stats", "s.pt", "--out", "o", "--keep", "4"],
+    }[stage]
+    assert module.build_parser().parse_args(argv).dequantize is False
+    assert module.build_parser().parse_args([*argv, "--dequantize"]).dequantize is True

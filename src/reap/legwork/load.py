@@ -35,6 +35,34 @@ def read_pruning_record(path: str | pathlib.Path) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
+def is_fp8_checkpoint(path: str | pathlib.Path) -> bool:
+    """Whether the checkpoint ships FP8 weights (``quantization_config.quant_method``
+    ``fp8``; DeepSeek-V4's FP4-packed experts ride the same config)."""
+    try:
+        config = json.loads((pathlib.Path(path) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    quant = config.get("quantization_config")
+    return isinstance(quant, dict) and str(quant.get("quant_method", "")).lower() == "fp8"
+
+
+def dequantize_kwargs(path: str | pathlib.Path, dtype: str = "auto") -> dict[str, Any]:
+    """What ``--dequantize`` adds to ``from_pretrained``: an FP8 checkpoint
+    loads every weight in BF16, the load transformers picks by itself under
+    compute capability 8.9, so a GPU the lane installs no FP8 kernels for
+    (an AMD ROCm board, which reports 9.x) runs plain BF16 matmuls. The
+    loading-attributes ``FineGrainedFP8Config`` only flips ``dequantize`` on
+    the checkpoint's own scale layout. Any other checkpoint loads as it is."""
+    if not is_fp8_checkpoint(path):
+        return {}
+    from transformers import FineGrainedFP8Config
+
+    kwargs: dict[str, Any] = {"quantization_config": FineGrainedFP8Config(dequantize=True)}
+    if dtype == "auto":
+        kwargs["dtype"] = torch.bfloat16
+    return kwargs
+
+
 @contextmanager
 def _widened_blocks(config, widths: list[int]) -> Iterator[None]:
     """Patch the MoE block class so layer ``i`` is built ``widths[i]`` wide."""

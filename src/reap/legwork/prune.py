@@ -68,6 +68,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from reap.legwork.arch import HASH_KIND, MoeLayer, model_attrs, moe_layers, num_routed_experts
+from reap.legwork.load import dequantize_kwargs
 from reap.legwork.observer import load_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 from reap.legwork.slice import slice_source, source_draft_layers, source_moe_layers
@@ -490,7 +491,7 @@ def save_pruned(
     return out
 
 
-def _load_model(path: str, dtype: str, device: str):
+def _load_model(path: str, dtype: str, device: str, dequantize: bool = False):
     from transformers import AutoModelForCausalLM
 
     kwargs: dict[str, Any] = {}
@@ -498,6 +499,8 @@ def _load_model(path: str, dtype: str, device: str):
         kwargs["dtype"] = getattr(torch, dtype)
     else:
         kwargs["dtype"] = "auto"
+    if dequantize:
+        kwargs.update(dequantize_kwargs(path, dtype))
     if device == "auto":
         kwargs["device_map"] = "auto"
     elif device != "cpu":
@@ -532,6 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dtype", default="auto", choices=("auto", "float32", "bfloat16", "float16"))
     parser.add_argument("--device", default="cpu", help="cpu, cuda, cuda:N or auto (accelerate device_map)")
+    parser.add_argument(
+        "--dequantize",
+        action="store_true",
+        help="load an FP8 checkpoint dequantized to BF16, for GPUs the lane installs no FP8 "
+        "kernels for (an AMD ROCm board); any other checkpoint loads as it is",
+    )
     parser.add_argument(
         "--slice-source",
         action="store_true",
@@ -648,7 +657,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         raise SystemExit("reap-prune: --stats is required unless --kept names the experts")
     progress(0)
     stats = load_router_stats(args.stats) if args.stats is not None else None
-    model = _load_model(args.model, args.dtype, args.device)
+    model = _load_model(args.model, args.dtype, args.device, args.dequantize)
     progress(10)
     try:
         report = prune_model(

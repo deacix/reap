@@ -20,6 +20,8 @@
 > reap-prune --model <snapshot> --stats <router-stats.pt> --out <pruned> --keep 192 --device auto
 > #    or keep exactly the experts a keep plan lists (--stats optional)
 > reap-prune --model <snapshot> --kept <kept.json> --out <pruned> --keep 192 --device auto
+> #    on a GPU the lane installs no FP8 kernels for (an AMD ROCm board), both stages load an FP8
+> #    checkpoint in BF16: add --dequantize (any other checkpoint loads as it is)
 > ```
 >
 > Every layer is pruned to the same width because both stock loaders

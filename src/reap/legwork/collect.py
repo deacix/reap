@@ -67,6 +67,7 @@ import torch
 
 from reap.legwork.compat import patch_remote_code
 from reap.legwork.expert_map import build_expert_map, write_expert_map
+from reap.legwork.load import dequantize_kwargs
 from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 
@@ -238,10 +239,14 @@ class SampleEncoder:
         return list(encoded["input_ids"])
 
 
-def _load_model(path: str, dtype: str, device: str, trust_remote_code: bool = False):
+def _load_model(
+    path: str, dtype: str, device: str, trust_remote_code: bool = False, dequantize: bool = False
+):
     from transformers import AutoModelForCausalLM
 
     kwargs: dict[str, Any] = {"dtype": "auto" if dtype == "auto" else getattr(torch, dtype)}
+    if dequantize:
+        kwargs.update(dequantize_kwargs(path, dtype))
     if device == "auto":
         kwargs["device_map"] = "auto"
     elif device != "cpu":
@@ -273,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="load the checkpoint's own model code (MiMo-V2's working copy); the caller "
         "passes it only for a snapshot at a pinned revision",
     )
+    parser.add_argument(
+        "--dequantize",
+        action="store_true",
+        help="load an FP8 checkpoint dequantized to BF16, for GPUs the lane installs no FP8 "
+        "kernels for (an AMD ROCm board); any other checkpoint loads as it is",
+    )
     return parser
 
 
@@ -298,7 +309,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
                 f"reap-collect: --map decodes token ids with the model's tokenizer, and "
                 f"{args.model} holds none that loads ({type(error).__name__})"
             ) from error
-    model = _load_model(args.model, args.dtype, args.device, args.trust_remote_code)
+    model = _load_model(args.model, args.dtype, args.device, args.trust_remote_code, args.dequantize)
     device = next(model.parameters()).device
     observer = RouterStatsObserver(model, layers or None)
     progress(5)
