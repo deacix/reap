@@ -65,8 +65,11 @@ def dequantize_kwargs(path: str | pathlib.Path, dtype: str = "auto") -> dict[str
 
 def loaded_dequantized(model, path: str | pathlib.Path) -> bool:
     """Whether an FP8 checkpoint came up in float: ``--dequantize``, or
-    transformers' own fallback on a GPU under compute capability 8.9."""
-    return is_fp8_checkpoint(path) and not getattr(model, "is_quantized", False)
+    transformers' own fallback on a GPU under compute capability 8.9.
+    transformers keeps ``hf_quantizer`` on a model whose FP8 weights stay
+    FP8 and drops it when it dequantizes (``is_quantized`` is only ever set
+    on the second path, so it cannot tell them apart)."""
+    return is_fp8_checkpoint(path) and getattr(model, "hf_quantizer", None) is None
 
 
 _SCALE_SOURCE = ".weight_scale_inv$"
@@ -122,18 +125,37 @@ def drop_dequantize_codec(model) -> int:
     return dropped
 
 
+def _router_at_own_precision(forward, router):
+    """``forward`` outside autocast, fed at the router weight's dtype."""
+
+    def run(hidden_states, *args, **kwargs):
+        with torch.autocast(hidden_states.device.type, enabled=False):
+            return forward(hidden_states.to(router.weight.dtype), *args, **kwargs)
+
+    return run
+
+
 @contextmanager
 def float_forward(model) -> Iterator[None]:
     """BF16 autocast on every device the model sits on. DeepSeek-V4 keeps its
     norms and hyper-connections in float32, so a dequantized model's float32
     activations meet BF16 linears, which a plain forward refuses
     (``expected m1 and m2 to have the same dtype``); the FP8 path's linears
-    cast their own input."""
+    cast their own input. The routers stay out of it: autocast would run
+    their ``F.linear`` in BF16, and the routing is what the collect records."""
     device_types = sorted({param.device.type for param in model.parameters()} - {"meta"})
-    with ExitStack() as stack:
-        for device_type in device_types:
-            stack.enter_context(torch.autocast(device_type, dtype=torch.bfloat16))
-        yield
+    routers = [layer.router for layer in moe_layers(model)]
+    forwards = [router.forward for router in routers]
+    for router, forward in zip(routers, forwards):
+        router.forward = _router_at_own_precision(forward, router)
+    try:
+        with ExitStack() as stack:
+            for device_type in device_types:
+                stack.enter_context(torch.autocast(device_type, dtype=torch.bfloat16))
+            yield
+    finally:
+        for router, forward in zip(routers, forwards):
+            router.forward = forward
 
 
 @contextmanager

@@ -548,3 +548,47 @@ def test_the_stage_clis_run_an_fp8_reference_with_dequantize(tmp_path, tiny_v4_d
     ids = torch.randint(4, VOCAB, (1, 10), generator=torch.Generator().manual_seed(9))
     with torch.no_grad(), float_forward(reloaded):
         assert torch.isfinite(reloaded(input_ids=ids, use_cache=False).logits.float()).all()
+
+
+def test_the_dequantized_predicate_reads_the_quantizer_transformers_keeps(tmp_path, tiny_v4_dir):
+    """transformers keeps `hf_quantizer` on a model whose FP8 weights stay FP8
+    (an NVIDIA board at compute capability 8.9 and up) and drops it when it
+    dequantizes; `is_quantized` is only ever set on the second path, so it
+    cannot tell the two apart (deacix/legwork#24439)."""
+    from reap.legwork.load import loaded_dequantized
+    from reap.legwork.prune import _load_model
+
+    fp8 = _fp8_copy(tiny_v4_dir, tmp_path / "fp8")
+    model = _load_model(str(fp8), "auto", "cpu", dequantize=True)
+    assert loaded_dequantized(model, fp8)
+    model.hf_quantizer = object()
+    assert not loaded_dequantized(model, fp8)
+    assert not loaded_dequantized(build_tiny_v4(), tiny_v4_dir)
+
+
+def test_float_forward_keeps_the_routers_at_their_own_precision(tmp_path, tiny_v4_dir):
+    """Autocast would run the router's `F.linear` in BF16; the statistics the
+    collect records are the router's own, so it computes at its weight's
+    dtype, as it does on the FP8 path, and gets its forward back after."""
+    from reap.legwork.load import float_forward
+    from reap.legwork.prune import _load_model
+
+    fp8 = _fp8_copy(tiny_v4_dir, tmp_path / "fp8")
+    model = _load_model(str(fp8), "auto", "cpu", dequantize=True)
+    routers = [layer.router for layer in moe_layers(model)]
+    before = [router.forward for router in routers]
+    seen = []
+    hooks = [
+        router.register_forward_hook(
+            lambda module, args, out: seen.append((module.weight.dtype, out[0].dtype))
+        )
+        for router in routers
+    ]
+    ids = torch.randint(4, VOCAB, (1, 10), generator=torch.Generator().manual_seed(2))
+    with torch.no_grad(), float_forward(model):
+        model(input_ids=ids, use_cache=False)
+    for hook in hooks:
+        hook.remove()
+    assert len(seen) == len(routers), seen
+    assert all(logits == weight for weight, logits in seen), seen
+    assert [router.forward for router in routers] == before
