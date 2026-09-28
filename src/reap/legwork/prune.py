@@ -68,7 +68,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from reap.legwork.arch import HASH_KIND, MoeLayer, model_attrs, moe_layers, num_routed_experts
-from reap.legwork.load import dequantize_kwargs
+from reap.legwork.load import dequantize_kwargs, drop_dequantize_codec, loaded_dequantized
 from reap.legwork.observer import load_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 from reap.legwork.slice import slice_source, source_draft_layers, source_moe_layers
@@ -506,6 +506,10 @@ def _load_model(path: str, dtype: str, device: str, dequantize: bool = False):
     elif device != "cpu":
         kwargs["device_map"] = device
     model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+    if loaded_dequantized(model, path):
+        # The pruned checkpoint is the float model in memory, not FP8 codes
+        # under a config that no longer names FP8.
+        drop_dequantize_codec(model)
     return model.eval()
 
 

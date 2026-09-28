@@ -407,3 +407,144 @@ def test_dequantize_reaches_from_pretrained(tmp_path, monkeypatch, stage):
     }[stage]
     assert module.build_parser().parse_args(argv).dequantize is False
     assert module.build_parser().parse_args([*argv, "--dequantize"]).dequantize is True
+
+
+def _fp8_copy(source, out, block: int = 16):
+    """`source` as a pre-quantized FP8 checkpoint, the way DeepSeek-V4 ships
+    it: the attention and expert linears the block tiles stored as FP8 codes
+    beside a per-block `weight_scale_inv` (the router, the head, the
+    embeddings and the hyper-connections stay float), the config naming FP8."""
+    import shutil
+
+    from safetensors.torch import load_file, save_file
+    from transformers import FineGrainedFP8Config
+    from transformers.integrations.finegrained_fp8 import Fp8Quantize
+
+    class _Quantizer:
+        quantization_config = FineGrainedFP8Config(weight_block_size=(block, block))
+
+    quantize = Fp8Quantize(_Quantizer())
+    shutil.copytree(source, out)
+    for shard in out.glob("*.safetensors"):
+        tensors = load_file(shard)
+        converted = {}
+        for key, value in tensors.items():
+            tiles = value.ndim == 2 and value.shape[0] % block == 0 and value.shape[1] % block == 0
+            linear = (".attn." in key or ".ffn." in key) and ".gate." not in key
+            if key.endswith(".weight") and tiles and linear:
+                converted.update(quantize._quantize_one(key, value))
+            else:
+                converted[key] = value
+        save_file(converted, shard, metadata={"format": "pt"})
+    config = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    config["quantization_config"] = {
+        "quant_method": "fp8",
+        "fmt": "e4m3",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [block, block],
+    }
+    (out / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    return out
+
+
+def test_a_dequantized_prune_saves_the_float_checkpoint_it_holds(tmp_path, tiny_v4_dir):
+    """transformers reverses its FP8 dequantize op into a re-quantize on
+    save, which wrote FP8 codes under a config that no longer names FP8
+    (deacix/legwork#24439): a plain reload read garbage. The pruned
+    checkpoint is the float model the prune held."""
+    from transformers import AutoModelForCausalLM
+
+    from reap.legwork.load import float_forward, loaded_dequantized
+    from reap.legwork.prune import _load_model
+
+    fp8 = _fp8_copy(tiny_v4_dir, tmp_path / "fp8")
+    model = _load_model(str(fp8), "auto", "cpu", dequantize=True)
+    assert loaded_dequantized(model, fp8)
+    assert [name for name, p in model.named_parameters() if p.dtype == torch.float8_e4m3fn] == []
+    with float_forward(model):
+        stats = _observe(model)
+    report = prune_model(model, stats, keep=KEEP)
+    out = save_pruned(model, tmp_path / "pruned", report)
+    _assert_float_checkpoint(out)
+
+    reloaded = AutoModelForCausalLM.from_pretrained(out, dtype=torch.bfloat16).eval()
+    ids = torch.randint(4, VOCAB, (1, 10), generator=torch.Generator().manual_seed(5))
+    with torch.no_grad(), float_forward(model):
+        held = model(input_ids=ids, use_cache=False).logits.float()
+        saved = reloaded(input_ids=ids, use_cache=False).logits.float()
+    assert torch.allclose(held, saved, atol=1e-2), (held - saved).abs().max()
+
+
+def _tensor_shapes(out) -> dict[str, list[int]]:
+    from safetensors import safe_open
+
+    shapes = {}
+    for shard in out.glob("*.safetensors"):
+        with safe_open(shard, "pt") as handle:
+            for key in handle.keys():
+                shapes[key] = handle.get_slice(key).get_shape()
+    return shapes
+
+
+def _assert_float_checkpoint(out):
+    from safetensors import safe_open
+
+    config = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert "quantization_config" not in config
+    for shard in out.glob("*.safetensors"):
+        with safe_open(shard, "pt") as handle:
+            keys = list(handle.keys())
+            assert not [key for key in keys if key.endswith("weight_scale_inv")], shard
+            assert {handle.get_slice(key).get_dtype() for key in keys}.isdisjoint({"F8_E4M3"})
+
+
+def test_the_stage_clis_run_an_fp8_reference_with_dequantize(tmp_path, tiny_v4_dir, calibration_jsonl):
+    """The worker's ROCm stage calls (deacix/legwork#24439): reap-collect
+    --dequantize runs its forwards over the BF16 copy (a plain BF16
+    DeepSeek-V4 forward refuses its own float32 norms), and reap-prune
+    --dequantize writes a float checkpoint that reloads and runs."""
+    from reap.legwork import collect, prune
+    from reap.legwork.load import float_forward
+
+    fp8 = _fp8_copy(tiny_v4_dir, tmp_path / "fp8")
+    stats_path = tmp_path / "router-stats.pt"
+    progress: list[float] = []
+    assert (
+        collect.main(
+            ["--model", str(fp8), "--calib", str(calibration_jsonl), "--out", str(stats_path),
+             "--seq-len", "32", "--dequantize"],
+            progress=progress.append,
+        )
+        == 0
+    )
+    assert progress[-1] == 100
+    assert load_router_stats(stats_path)["calibration"]["samples"] == 12
+    out = tmp_path / "pruned"
+    assert (
+        prune.main(
+            ["--model", str(fp8), "--stats", str(stats_path), "--out", str(out),
+             "--keep", str(KEEP), "--dequantize"],
+            progress=lambda pct: None,
+        )
+        == 0
+    )
+    _assert_float_checkpoint(out)
+    # The layout is the checkpoint's own: the same tensors a prune of the
+    # float source writes, per expert, with the same shapes.
+    float_out = tmp_path / "pruned-float"
+    assert (
+        prune.main(
+            ["--model", str(tiny_v4_dir), "--stats", str(stats_path), "--out", str(float_out),
+             "--keep", str(KEEP)],
+            progress=lambda pct: None,
+        )
+        == 0
+    )
+    assert _tensor_shapes(out) == _tensor_shapes(float_out)
+    from transformers import AutoModelForCausalLM
+
+    reloaded = AutoModelForCausalLM.from_pretrained(out, dtype=torch.bfloat16).eval()
+    assert reloaded.config.n_routed_experts == KEEP
+    ids = torch.randint(4, VOCAB, (1, 10), generator=torch.Generator().manual_seed(9))
+    with torch.no_grad(), float_forward(reloaded):
+        assert torch.isfinite(reloaded(input_ids=ids, use_cache=False).logits.float()).all()

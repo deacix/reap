@@ -61,13 +61,14 @@ import hashlib
 import json
 import pathlib
 import sys
+from contextlib import nullcontext
 from typing import Any, Callable, Iterator
 
 import torch
 
 from reap.legwork.compat import patch_remote_code
 from reap.legwork.expert_map import build_expert_map, write_expert_map
-from reap.legwork.load import dequantize_kwargs
+from reap.legwork.load import dequantize_kwargs, float_forward, loaded_dequantized
 from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
 
@@ -315,8 +316,9 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
     progress(5)
     tokens = 0
     seen = 0
+    forward = float_forward(model) if loaded_dequantized(model, args.model) else nullcontext()
     try:
-        with torch.no_grad():
+        with torch.no_grad(), forward:
             for number, row in iter_rows(calib):
                 if args.max_samples is not None and seen >= args.max_samples:
                     break

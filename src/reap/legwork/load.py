@@ -21,7 +21,7 @@ import copy
 import inspect
 import json
 import pathlib
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Iterator
 
 import torch
@@ -61,6 +61,79 @@ def dequantize_kwargs(path: str | pathlib.Path, dtype: str = "auto") -> dict[str
     if dtype == "auto":
         kwargs["dtype"] = torch.bfloat16
     return kwargs
+
+
+def loaded_dequantized(model, path: str | pathlib.Path) -> bool:
+    """Whether an FP8 checkpoint came up in float: ``--dequantize``, or
+    transformers' own fallback on a GPU under compute capability 8.9."""
+    return is_fp8_checkpoint(path) and not getattr(model, "is_quantized", False)
+
+
+_SCALE_SOURCE = ".weight_scale_inv$"
+_ANCHORED_WEIGHT = ".weight$"
+
+
+def drop_dequantize_codec(model) -> int:
+    """transformers keeps the load-time weight conversions on the model to
+    revert them on save, and the FP8 loader's dequantize op reverses into a
+    re-quantize: every 2-D weight the block tiles, the embeddings and the
+    head included, would come back out as FP8 codes beside a
+    ``weight_scale_inv``, under a config that no longer names FP8, so a plain
+    reload reads garbage (deacix/legwork#24439). Undo what the dequantizing
+    load did to the conversions so the model saves as the float checkpoint it
+    holds, in the checkpoint's own layout: the dequantize-only converter goes,
+    and each model converter it was prepended to (an expert merge) gets back
+    its weight sources, without the scale sources and the ``$`` anchors the
+    quantizer added. -> the number of dequantize ops dropped."""
+    from transformers.core_model_loading import WeightConverter
+    from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+    conversions = getattr(model, "_weight_conversions", None)
+    if not isinstance(conversions, list):
+        return 0
+    kept, dropped = [], 0
+    for conversion in conversions:
+        operations = getattr(conversion, "operations", None)
+        if not isinstance(operations, list) or not any(
+            isinstance(op, Fp8Dequantize) for op in operations
+        ):
+            kept.append(conversion)
+            continue
+        remaining = [op for op in operations if not isinstance(op, Fp8Dequantize)]
+        dropped += len(operations) - len(remaining)
+        if not remaining:
+            continue
+        sources = [
+            pattern[:-1] if pattern.endswith(_ANCHORED_WEIGHT) else pattern
+            for pattern in conversion._original_source_patterns
+            if not pattern.endswith(_SCALE_SOURCE)
+        ]
+        restored = WeightConverter(
+            source_patterns=sources,
+            target_patterns=list(conversion._original_target_patterns),
+            operations=remaining,
+            force_cpu=conversion.force_cpu,
+        )
+        for name in ("scope_prefix", "base_model_prefix"):
+            if hasattr(conversion, name):
+                setattr(restored, name, getattr(conversion, name))
+        kept.append(restored)
+    model._weight_conversions = kept
+    return dropped
+
+
+@contextmanager
+def float_forward(model) -> Iterator[None]:
+    """BF16 autocast on every device the model sits on. DeepSeek-V4 keeps its
+    norms and hyper-connections in float32, so a dequantized model's float32
+    activations meet BF16 linears, which a plain forward refuses
+    (``expected m1 and m2 to have the same dtype``); the FP8 path's linears
+    cast their own input."""
+    device_types = sorted({param.device.type for param in model.parameters()} - {"meta"})
+    with ExitStack() as stack:
+        for device_type in device_types:
+            stack.enter_context(torch.autocast(device_type, dtype=torch.bfloat16))
+        yield
 
 
 @contextmanager
