@@ -53,6 +53,7 @@ research = [
 reap-collect = "reap.legwork.collect:main"
 reap-prune = "reap.legwork.prune:main"
 reap-materialize = "reap.legwork.materialize:main"
+reap-fp8 = "reap.legwork.fp8:main"
 
 [project.urls]
 Upstream = "https://github.com/CerebrasResearch/reap"

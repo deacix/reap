@@ -4,7 +4,7 @@
 > slim, importable prune lane for transformers 5.x's fused mixture-of-experts
 > families, DeepSeek-V4 first: `MODEL_ATTRS["DeepseekV4ForCausalLM"]` (alias
 > `MODEL_ATTRS["deepseek_v4"]`), the `reap.legwork` package and its CLIs
-> (`reap-collect`, `reap-prune`, `reap-materialize`), which print
+> (`reap-collect`, `reap-prune`, `reap-materialize`, `reap-fp8`), which print
 > `STAGE_PROGRESS <pct>` lines for the Legwork desktop worker. The core
 > installs with torch, transformers, accelerate, safetensors and
 > huggingface_hub only; upstream's research stack is the `research` extra.
@@ -80,6 +80,24 @@
 > (`tests/legwork/fixtures/mimo_v2`): the working copy matches the formats'
 > round trip bit for bit, and a sliced build serves exactly as the source
 > does with the dropped experts masked out of its router.
+>
+> Since `0.1.0+legwork.7` a DeepSeek-V4 prune made `--dequantize` becomes the
+> FP8 build vLLM serves. transformers saves that tree in its own tensor names
+> and config words, and vLLM's DeepSeek-V4 path reads only DeepSeek's own
+> storage, so the build is written in the DeepSeek-V4-Flash-Base layout
+> (`expert_dtype: "fp8"`):
+>
+> ```bash
+> # every tensor under the reference's name (checked both ways), each weight the reference
+> # scales as FP8 tiles with a float32 .scale, the reference's config with the prune's edits
+> reap-fp8 --model <pruned> --source <snapshot> --out <build>
+> ```
+>
+> It streams on the CPU, reads only the reference's index, headers and
+> config, and ends with `REAP_RESULT` `out`, `tensors`, `quantized`, `bytes`
+> and `weight_block_size`. The CPU suite adds the tiny V4 in DeepSeek's own
+> storage (E8M0-scaled FP8 linears, I8-packed MXFP4 experts) and checks the
+> build against DeepSeek-V4-Flash-0731's tensor schema.
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).
