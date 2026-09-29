@@ -7,13 +7,22 @@ CLI::
     python -m reap.legwork.collect --model <dir> --calib <set.jsonl> \
         --out <router-stats.pt> [--map <expert-map.json.gz>] [--seq-len 2048] \
         [--max-samples N] [--layers 3,4,5] [--device cpu|cuda|auto] \
-        [--dtype auto|bfloat16|float32] [--trust-remote-code]
+        [--dtype auto|bfloat16|float32] [--trust-remote-code] [--offload]
 
 ``--trust-remote-code`` loads the checkpoint's own model code: a MiMo-V2
 working copy (``reap-materialize``), whose ``modeling_mimo_v2.py`` rides the
 snapshot. The caller passes it only for a snapshot at a pinned revision;
 ``reap.legwork.compat`` adapts that code's mask calls to the installed
 transformers.
+
+``--offload`` loads across the visible GPUs first and keeps the decoder
+layers they cannot hold in host memory, streamed to the GPUs on every
+forward (``reap.legwork.offload``): a MiMo-V2.6-Pro working copy of about
+2 TB on eight 141 GiB boards. A model the GPUs and host memory cannot hold
+together is refused before it loads; one the GPUs hold places nothing in
+host memory. ``--max-memory`` names the budgets instead of
+measuring them, and ``--offload-folder`` admits the disk for what they leave
+out: both are for a CPU-only run (the tests, the worker's smoke).
 
 The calibration set is JSON Lines; each row is one sample in one of four
 shapes: ``{"text": "..."}``, ``{"messages": [{"role", "content"}, ...]}``
@@ -49,9 +58,10 @@ fast).
 
 Prints ``STAGE_PROGRESS <pct>`` lines and a final ``REAP_RESULT {json}``:
 ``out``, ``samples``, ``tokens``, ``layers``, ``model_type``,
-``template_fallbacks``, ``sources`` (``[{id, private, rows, tokens}]``) and
+``template_fallbacks``, ``sources`` (``[{id, private, rows, tokens}]``),
 ``map`` (``{path, sha256, bytes}`` of the written map, ``null`` without
-``--map``).
+``--map``) and ``offload`` (``{gpu_bytes, host_bytes, disk_bytes}``, where
+the load placed the model, ``null`` without ``--offload``).
 """
 
 from __future__ import annotations
@@ -70,6 +80,15 @@ from reap.legwork.compat import patch_remote_code
 from reap.legwork.expert_map import build_expert_map, write_expert_map
 from reap.legwork.load import dequantize_kwargs, float_forward, loaded_dequantized
 from reap.legwork.observer import DEFAULT_SOURCE, RouterStatsObserver, save_router_stats
+from reap.legwork.offload import (
+    OffloadRefused,
+    config_dtype,
+    input_device,
+    load_offloaded,
+    measured_max_memory,
+    offload_device_map,
+    parse_max_memory,
+)
 from reap.legwork.progress import parse_layer_list, stage_progress
 
 #: How many template fallbacks are named on stderr; the rest only count.
@@ -160,11 +179,14 @@ def render_plain(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | N
 class SampleEncoder:
     """Turn calibration rows into token-id lists, loading the tokenizer on
     the first row that needs one; counts the ``messages`` rows the chat
-    template could not render (``template_fallbacks``)."""
+    template could not render (``template_fallbacks``). A snapshot the
+    caller admits the code of loads its tokenizer the same way, or
+    transformers asks on stdout whether to run that code."""
 
-    def __init__(self, model_dir: str, seq_len: int):
+    def __init__(self, model_dir: str, seq_len: int, trust_remote_code: bool = False):
         self.model_dir = model_dir
         self.seq_len = seq_len
+        self.trust_remote_code = trust_remote_code
         self._tokenizer = None
         self.template_fallbacks = 0
 
@@ -173,7 +195,8 @@ class SampleEncoder:
         if self._tokenizer is None:
             from transformers import AutoTokenizer
 
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+            kwargs = {"trust_remote_code": True} if self.trust_remote_code else {}
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir, **kwargs)
         return self._tokenizer
 
     def render_messages(self, row: dict[str, Any], where: str) -> tuple[str, bool]:
@@ -260,6 +283,29 @@ def _load_model(
     return model
 
 
+def load_offload_model(args: argparse.Namespace) -> tuple[Any, dict[str, int]]:
+    """``--offload``'s load: the device map over the GPUs and host memory,
+    then the model along it. ``(model, placement)``; a model the budgets
+    cannot hold exits naming the shortfall."""
+    if args.dequantize:
+        raise SystemExit("reap-collect: --offload loads a BF16 working copy; drop --dequantize")
+    try:
+        budgets = parse_max_memory(args.max_memory) if args.max_memory else measured_max_memory()
+    except ValueError as error:
+        raise SystemExit(f"reap-collect: {error}") from error
+    dtype = config_dtype(args.model, args.dtype)
+    try:
+        device_map, placement = offload_device_map(
+            args.model, dtype, budgets, args.trust_remote_code, args.offload_folder
+        )
+    except OffloadRefused as error:
+        raise SystemExit(f"reap-collect: {error}") from error
+    model = load_offloaded(args.model, device_map, dtype, args.trust_remote_code, args.offload_folder)
+    if args.trust_remote_code:
+        patch_remote_code(model)
+    return model, placement
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="reap-collect", description="Record REAP router stats over a calibration set."
@@ -285,6 +331,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="load an FP8 checkpoint dequantized to BF16, for GPUs the lane installs no FP8 "
         "kernels for (an AMD ROCm board); any other checkpoint loads as it is",
     )
+    parser.add_argument(
+        "--offload",
+        action="store_true",
+        help="load across the GPUs first and keep the decoder layers they cannot hold in host "
+        "memory, streamed on every forward; refused when the two cannot hold the model",
+    )
+    parser.add_argument(
+        "--max-memory",
+        default=None,
+        help='with --offload: the budgets as JSON ({"0": bytes, "cpu": bytes}) instead of '
+        "measuring them (a CPU-only run)",
+    )
+    parser.add_argument(
+        "--offload-folder",
+        default=None,
+        help="with --offload: a folder for what the budgets leave out (a CPU-only run only)",
+    )
     return parser
 
 
@@ -300,7 +363,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
     if total == 0:
         raise SystemExit(f"reap-collect: {calib} holds no calibration rows")
     progress(0)
-    encoder = SampleEncoder(args.model, args.seq_len)
+    encoder = SampleEncoder(args.model, args.seq_len, args.trust_remote_code)
     map_tokenizer = None
     if args.map:
         try:
@@ -310,8 +373,15 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
                 f"reap-collect: --map decodes token ids with the model's tokenizer, and "
                 f"{args.model} holds none that loads ({type(error).__name__})"
             ) from error
-    model = _load_model(args.model, args.dtype, args.device, args.trust_remote_code, args.dequantize)
-    device = next(model.parameters()).device
+    placement = None
+    if args.offload:
+        model, placement = load_offload_model(args)
+        device = input_device(model)
+    else:
+        if args.max_memory or args.offload_folder:
+            raise SystemExit("reap-collect: --max-memory and --offload-folder go with --offload")
+        model = _load_model(args.model, args.dtype, args.device, args.trust_remote_code, args.dequantize)
+        device = next(model.parameters()).device
     observer = RouterStatsObserver(model, layers or None)
     progress(5)
     tokens = 0
@@ -364,6 +434,7 @@ def main(argv: list[str] | None = None, progress: Callable[[float], None] = stag
         "template_fallbacks": encoder.template_fallbacks,
         "sources": state["sources"],
         "map": map_info,
+        "offload": placement,
     }
     print("REAP_RESULT " + json.dumps(result), flush=True)
     return 0

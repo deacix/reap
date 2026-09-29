@@ -106,6 +106,12 @@ QUANTIZATION_CONFIG = {
 }
 
 
+def tiny_config(experts: int = EXPERTS) -> dict:
+    """``TINY_CONFIG`` with ``experts`` routed experts per MoE layer (24 for
+    the MiMo-V2.6-Pro shape: its 384 at the same quarter steps)."""
+    return dict(TINY_CONFIG, n_routed_experts=experts)
+
+
 def write_model_code(out: pathlib.Path) -> None:
     for name in CODE_FILES:
         shutil.copy2(FIXTURE_DIR / name, out / name)
@@ -117,15 +123,16 @@ def build_tiny_tokenizer_with_template():
     return tokenizer
 
 
-def build_tiny_mimo(seed: int = 0):
-    """The tiny BF16 MiMo-V2 (split attention projections), every weight
-    seeded; its model code comes from a scratch directory holding the
-    vendored files, as a working copy's does."""
+def build_tiny_mimo(seed: int = 0, experts: int = EXPERTS):
+    """The tiny BF16 MiMo-V2 (split attention projections) with ``experts``
+    routed experts per MoE layer, every weight seeded; its model code comes
+    from a scratch directory holding the vendored files, as a working
+    copy's does."""
     from transformers import AutoConfig, AutoModelForCausalLM
 
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="tiny-mimo-code-"))
     write_model_code(scratch)
-    config = dict(TINY_CONFIG, attention_projection_layout="split")
+    config = dict(tiny_config(experts), attention_projection_layout="split")
     (scratch / "config.json").write_text(json.dumps(config), encoding="utf-8")
     auto_config = AutoConfig.from_pretrained(scratch, trust_remote_code=True)
     model = AutoModelForCausalLM.from_config(auto_config, trust_remote_code=True, dtype=torch.bfloat16)
@@ -198,7 +205,11 @@ def write_hub_checkpoint(model, out: pathlib.Path | str) -> pathlib.Path:
             total += tensors[name].numel() * tensors[name].element_size()
     index = {"metadata": {"save_format": "mxfp4", "total_size": total, "tp_size": TP}, "weight_map": weight_map}
     (out / "model.safetensors.index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
-    config = dict(TINY_CONFIG, attention_projection_layout="fused_qkv", quantization_config=QUANTIZATION_CONFIG)
+    config = dict(
+        tiny_config(int(model.config.n_routed_experts)),
+        attention_projection_layout="fused_qkv",
+        quantization_config=QUANTIZATION_CONFIG,
+    )
     (out / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     (out / "generation_config.json").write_text(json.dumps({"bos_token_id": 1, "eos_token_id": 2}), encoding="utf-8")
     write_model_code(out)
