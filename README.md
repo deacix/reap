@@ -98,6 +98,22 @@
 > and `weight_block_size`. The CPU suite adds the tiny V4 in DeepSeek's own
 > storage (E8M0-scaled FP8 linears, I8-packed MXFP4 experts) and checks the
 > build against DeepSeek-V4-Flash-0731's tensor schema.
+>
+> Since `0.1.0+legwork.8` `reap-collect --offload` collects over a working
+> copy the GPUs cannot hold (MiMo-V2.6-Pro's is about 2 TB): the device map
+> fills every visible GPU (its free memory less a reserve for activations),
+> then host memory (its available memory less a floor), decoder layers whole,
+> and accelerate streams each host-held layer to its GPU on every forward.
+> A model the two cannot hold is refused before it loads, never spilled to
+> disk; `REAP_RESULT` adds `offload` (`{gpu_bytes, host_bytes, disk_bytes}`).
+> `--max-memory '{"0": bytes, "cpu": bytes}'` and `--offload-folder` stand in
+> for the measured budgets and the disk on a CPU-only run (the tests). A
+> collect with `--trust-remote-code` loads the tokenizer with it too, so
+> transformers never asks on stdout.
+>
+> ```bash
+> reap-collect --model <working-copy> --calib <set.jsonl> --out <router-stats.pt> --trust-remote-code --offload
+> ```
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).
