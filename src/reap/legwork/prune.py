@@ -28,12 +28,13 @@ unique expert ids in ``[0, experts)``; ``keep`` must equal ``--keep``. A
 draft-block scope (``D<n>``) refuses, since the pruned checkpoint carries
 no draft blocks, and so does ``--skip-layers`` beside ``--kept``.
 
-``--slice-source`` (MiMo-V2) never loads a model. The kept ids come from
-``--model``'s ``config.json`` (its ``moe_layer_freq`` layers, each
-``n_routed_experts`` wide) and the router stats a working copy's collect
-wrote, or ``--kept``; ``reap.legwork.slice`` then writes the build from
-``--model``'s own tensors at their stored precision. ``--drop-drafts``
-leaves out the multi-token-prediction layers and the DFlash drafter.
+``--slice-source`` (MiMo-V2, DeepSeek-V4) never loads a model. The kept ids
+come from ``--model``'s ``config.json`` (its MoE layers, each
+``n_routed_experts`` wide) and the router stats a collect wrote, or
+``--kept``; ``reap.legwork.slice`` then writes the build from ``--model``'s
+own tensors at their stored precision and under their own names.
+``--drop-drafts`` leaves out a MiMo-V2's multi-token-prediction layers and
+its DFlash drafter; a DeepSeek-V4 slice never carries its draft layers.
 
 CLI::
 
@@ -71,7 +72,7 @@ from reap.legwork.arch import HASH_KIND, MoeLayer, model_attrs, moe_layers, num_
 from reap.legwork.load import dequantize_kwargs, drop_dequantize_codec, loaded_dequantized
 from reap.legwork.observer import load_router_stats
 from reap.legwork.progress import parse_layer_list, stage_progress
-from reap.legwork.slice import slice_source, source_draft_layers, source_moe_layers
+from reap.legwork.slice import V4_MODEL_TYPE, slice_source, source_draft_layers, source_moe_layers
 
 METHODS = ("reap", "frequency", "weighted_frequency")
 #: The method a pruning record names when a kept plan chose the experts.
@@ -549,7 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--slice-source",
         action="store_true",
         help="write the pruned build by slicing --model's own tensors at their stored precision "
-        "(a MiMo-V2 Hub checkpoint) instead of loading the model",
+        "(a MiMo-V2 or DeepSeek-V4 Hub checkpoint) instead of loading the model",
     )
     parser.add_argument(
         "--drop-drafts",
@@ -596,7 +597,7 @@ def _main_slice(args: argparse.Namespace, progress: Callable[[float], None]) -> 
     except ValueError as error:
         raise SystemExit(f"reap-prune: {error}") from error
     draft_layers = source_draft_layers(args.model)
-    carried = 0 if args.drop_drafts else draft_layers
+    carried = 0 if args.drop_drafts or config.get("model_type") == V4_MODEL_TYPE else draft_layers
     record = report.to_record()
     record.update(
         {
