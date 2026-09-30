@@ -17,7 +17,8 @@ modifications Copyright 2026 the Legwork authors, under the same licence:
                               --slice-source), the ragged-checkpoint loader,
                               MiMo-V2's storage formats (MXFP4, FP8 blocks,
                               the TP-chunked fused qkv_proj), the BF16 working
-                              copy, the source slicer, the transformers
+                              copy, the source slicer (MiMo-V2 and
+                              DeepSeek-V4 in DeepSeek's own names), the transformers
                               shim for a checkpoint's own model code, the
                               FP8 build of a dequantized DeepSeek-V4 prune in
                               DeepSeek's own layout, the offloaded load over

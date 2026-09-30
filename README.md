@@ -114,6 +114,25 @@
 > ```bash
 > reap-collect --model <working-copy> --calib <set.jsonl> --out <router-stats.pt> --trust-remote-code --offload
 > ```
+>
+> Since `0.1.0+legwork.9` `reap-prune --slice-source` also slices a
+> DeepSeek-V4 Hub checkpoint, the prune an NVIDIA host runs. Without it the
+> prune keeps the reference in FP8 and FP4, and transformers 5.17 saves the
+> tree under `model.`-prefixed DeepSeek names the quantizer's transformers
+> 5.14 cannot map, with the experts' scale grids lost at the full width. The
+> slice builds no model: every tensor keeps DeepSeek's own name, dtype and
+> bytes, the kept experts' weights and `.scale` grids move to dense ids
+> together, router rows and biases follow the kept order, and each
+> hash-routed layer's `tid2eid` table is remapped as the in-memory prune
+> remaps it. The draft layers (`mtp.*`) are never carried, so
+> `num_nextn_predict_layers` becomes 0 and the record says so:
+>
+> ```bash
+> reap-prune --model <hub-snapshot> --kept <kept.json> --out <pruned> --keep 192 --slice-source
+> ```
+>
+> On the float twin of the CPU suite's tiny V4 the slice writes exactly the
+> tensors the in-memory prune holds, under DeepSeek's names.
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).
