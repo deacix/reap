@@ -4,7 +4,8 @@
 > slim, importable prune lane for transformers 5.x's fused mixture-of-experts
 > families, DeepSeek-V4 first: `MODEL_ATTRS["DeepseekV4ForCausalLM"]` (alias
 > `MODEL_ATTRS["deepseek_v4"]`), the `reap.legwork` package and its CLIs
-> (`reap-collect`, `reap-prune`, `reap-materialize`, `reap-fp8`), which print
+> (`reap-collect`, `reap-prune`, `reap-materialize`, `reap-fp8`,
+> `reap-mxfp4`), which print
 > `STAGE_PROGRESS <pct>` lines for the Legwork desktop worker. The core
 > installs with torch, transformers, accelerate, safetensors and
 > huggingface_hub only; upstream's research stack is the `research` extra.
@@ -133,6 +134,24 @@
 >
 > On the float twin of the CPU suite's tiny V4 the slice writes exactly the
 > tensors the in-memory prune holds, under DeepSeek's names.
+>
+> Also in `0.1.0+legwork.9`, `reap-mxfp4` writes an edited MiMo-V2 tree as
+> the native MXFP4 build SGLang serves (deacix/legwork#28563): every edited
+> residual writer re-encoded to the storage the source keeps for it —
+> expert down projections to MXFP4, the dense down projection to FP8
+> blocks, attention output projections as BF16 — and every other tensor
+> byte-identical from the source, with the source's config, index metadata
+> (`save_format: mxfp4`, `tp_size`) and model files:
+>
+> ```bash
+> reap-mxfp4 --model <edited> --source <snapshot> --out <build>
+> ```
+>
+> It streams tensor by tensor on the CPU and ends with `REAP_RESULT` `out`,
+> `tensors`, `quantized`, `bytes` and `mxfp4_block_size`. The CPU suite
+> checks the round trip on the tiny MiMo-V2: edited values survive the
+> re-encode, unedited bytes match the source, and the build serves like
+> the edited tree once materialized.
 
 ## Updates
 * 2026-03-30: We have added a memory-efficient layer-wise (block-wise) calibration observer for pruning large models on a single GPU (see `experiments/pruning-layerwise-cli.sh` on how to run layer-wise calibration).

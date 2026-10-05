@@ -21,9 +21,11 @@ modifications Copyright 2026 the Legwork authors, under the same licence:
                               DeepSeek-V4 in DeepSeek's own names), the transformers
                               shim for a checkpoint's own model code, the
                               FP8 build of a dequantized DeepSeek-V4 prune in
-                              DeepSeek's own layout, the offloaded load over
-                              the GPUs and host memory, the `reap-collect` /
-                              `reap-prune` / `reap-materialize` / `reap-fp8`
+                              DeepSeek's own layout, the MXFP4 build of an
+                              edited MiMo-V2 tree in the source's storage,
+                              the offloaded load over the GPUs and host
+                              memory, the `reap-collect` / `reap-prune` /
+                              `reap-materialize` / `reap-fp8` / `reap-mxfp4`
                               CLIs (chat templates with tools, template
                               fallbacks) and their STAGE_PROGRESS contract
   - tests/legwork/, tests/conftest.py
@@ -31,7 +33,8 @@ modifications Copyright 2026 the Legwork authors, under the same licence:
                               in DeepSeek's own storage) and a
                               tiny random MiMo-V2 in the V2.6 storage layout
                               (also in MiMo-V2.6-Pro's shape, offloaded),
-                              the pooled-REAP keep-plan fixture and its seeded
+                              the MXFP4 build's round trip, the pooled-REAP
+                              keep-plan fixture and its seeded
                               generator; the research suites collected only
                               with their stack
   - tests/legwork/fixtures/mimo_v2/
